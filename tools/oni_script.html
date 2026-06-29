@@ -1,0 +1,700 @@
+<script>
+  const API = "PASTE_YOUR_APPS_SCRIPT_EXEC_URL_HERE";
+
+  // ── CLOCK ─────────────────────────────────────────────────────────────────
+  function updateClock() {
+    const now = new Date();
+    let h = now.getHours();
+    const m = String(now.getMinutes()).padStart(2, '0');
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    document.getElementById('clock').textContent = `${h}:${m} ${ampm}`;
+  }
+  setInterval(updateClock, 1000);
+  updateClock();
+
+  // ── STATE ─────────────────────────────────────────────────────────────────
+  let selectedDate = todayMidnight();
+  let viewMode     = 'day';
+  const dataCache  = {}; // dateStr → { data, fetchedAt }
+  const CACHE_TTL  = 60_000;
+
+  function todayMidnight() {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  function isToday(d) {
+    const t = todayMidnight();
+    return d.getFullYear() === t.getFullYear() &&
+           d.getMonth()    === t.getMonth()    &&
+           d.getDate()     === t.getDate();
+  }
+
+  function formatDateKey(d) {
+    return d.getFullYear() + '-' +
+      String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0');
+  }
+
+  // ── NAVIGATION ────────────────────────────────────────────────────────────
+  function changeDate(delta) {
+    if (demoMode) return;
+    const d = new Date(selectedDate);
+    if      (viewMode === 'day')   d.setDate(d.getDate() + delta);
+    else if (viewMode === 'week')  d.setDate(d.getDate() + delta * 7);
+    else if (viewMode === 'month') { d.setMonth(d.getMonth() + delta); d.setDate(1); }
+    selectedDate = d;
+    loadView();
+  }
+
+  function goToToday() {
+    if (demoMode) return;
+    selectedDate = todayMidnight();
+    loadView();
+  }
+
+  function setViewMode(mode) {
+    viewMode = mode;
+    updateViewButtons();
+    loadView();
+  }
+
+  function updateViewButtons() {
+    ['day', 'week', 'month'].forEach(m => {
+      const btn = document.getElementById('view-' + m);
+      if (btn) btn.classList.toggle('active', m === viewMode);
+    });
+  }
+
+  function updateTodayBtn() {
+    const btn = document.getElementById('today-btn');
+    if (btn) btn.classList.toggle('visible', !(isToday(selectedDate) && viewMode === 'day'));
+  }
+
+  // ── FETCH WITH CACHE ──────────────────────────────────────────────────────
+  // useDefault=true → no action param (backend finds today/nearest upcoming)
+  // useDefault=false (default) → action=getDate for explicit date lookup
+  function fetchDateData(dateStr, useDefault) {
+    const c = dataCache[dateStr];
+    if (c && (Date.now() - c.fetchedAt) < CACHE_TTL) return Promise.resolve(c.data);
+
+    return new Promise(resolve => {
+      const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
+      const cb = 'oni_' + id;
+      const s  = document.createElement('script');
+      const base = `${API}?callback=${cb}&t=${Date.now()}`;
+      s.src = useDefault ? base : `${base}&action=getDate&date=${dateStr}`;
+
+      const timer = setTimeout(() => { cleanup(); resolve({ error: true }); }, 12000);
+
+      function cleanup() {
+        clearTimeout(timer);
+        delete window[cb];
+        try { document.head.removeChild(s); } catch (_) {}
+      }
+
+      window[cb] = json => {
+        cleanup();
+        dataCache[dateStr] = { data: json, fetchedAt: Date.now() };
+        resolve(json);
+      };
+      s.onerror = () => { cleanup(); resolve({ error: true }); };
+      document.head.appendChild(s);
+    });
+  }
+
+  // ── LOAD VIEW ─────────────────────────────────────────────────────────────
+  function loadView() {
+    updateTodayBtn();
+    if      (viewMode === 'day')   loadDayView();
+    else if (viewMode === 'week')  loadWeekView();
+    else if (viewMode === 'month') loadMonthView();
+  }
+
+  // ── DAY VIEW ──────────────────────────────────────────────────────────────
+  let allJobs             = [];
+  let pageIndex           = 0;
+  let pageTimer           = null;
+  let lastJobsHash        = '';
+  let currentDaysAhead    = 0;
+  let currentUpcomingDate = '';
+
+  function loadDayView() {
+    const dateStr   = formatDateKey(selectedDate);
+    const wrap      = document.getElementById('table-wrap');
+    const weekdayEl = document.getElementById('date-weekday');
+
+    weekdayEl.textContent = selectedDate.toLocaleDateString('en-US', { weekday: 'long' }).toUpperCase();
+    document.getElementById('date-str').textContent =
+      selectedDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }).toUpperCase();
+    weekdayEl.style.color = '';
+    wrap.classList.remove('week-scroll');
+
+    // Use default (find nearest) only for today in day view
+    fetchDateData(dateStr, isToday(selectedDate)).then(json => {
+      renderDayData(json);
+      document.getElementById('last-updated').textContent =
+        'Updated ' + new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    });
+  }
+
+  function renderDayData(json) {
+    const wrap       = document.getElementById('table-wrap');
+    const weekdayEl  = document.getElementById('date-weekday');
+    const jobCountEl = document.getElementById('job-count');
+    const newJobs    = json.jobs || [];
+    const newHash    = JSON.stringify(newJobs) + (json.daysAhead || 0) + (json.message || '');
+
+    if (newHash === lastJobsHash) return;
+    lastJobsHash = newHash;
+
+    if (!newJobs.length) {
+      if (pageTimer) clearInterval(pageTimer);
+      const msg = (json.message || '').trim() || 'No jobs scheduled';
+      wrap.innerHTML = `<div class="empty-state"><p>${msg}</p></div>`;
+      jobCountEl.textContent = ''; weekdayEl.style.color = ''; jobCountEl.style.color = '';
+      return;
+    }
+
+    allJobs          = newJobs;
+    currentDaysAhead = json.daysAhead || 0;
+    const isUpcoming = currentDaysAhead > 0;
+
+    if (isUpcoming && json.date) {
+      const [y, mo, d] = json.date.split('-');
+      currentUpcomingDate = new Date(+y, +mo - 1, +d)
+        .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase();
+      weekdayEl.style.color  = '#b87000';
+      jobCountEl.style.color = '#b87000';
+    } else {
+      currentUpcomingDate    = '';
+      weekdayEl.style.color  = '';
+      jobCountEl.style.color = '';
+    }
+
+    jobCountEl.textContent = allJobs.length +
+      (isUpcoming ? ' upcoming job' : ' job') + (allJobs.length !== 1 ? 's' : '');
+
+    startPagination(true);
+  }
+
+  // ── WEEK VIEW ─────────────────────────────────────────────────────────────
+  function getWeekDates(date) {
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    const dow = (d.getDay() + 6) % 7;
+    const mon = new Date(d);
+    mon.setDate(d.getDate() - dow);
+    return Array.from({ length: 7 }, (_, i) => {
+      const dd = new Date(mon);
+      dd.setDate(mon.getDate() + i);
+      return dd;
+    });
+  }
+
+  async function loadWeekView() {
+    const weekDates = getWeekDates(selectedDate);
+    const wrap = document.getElementById('table-wrap');
+    if (pageTimer) clearInterval(pageTimer);
+    wrap.classList.add('week-scroll');
+
+    const first = weekDates[0], last = weekDates[6];
+    const sameMonth = first.getMonth() === last.getMonth();
+    const rangeStr  = sameMonth
+      ? first.toLocaleDateString('en-US', { month: 'long' }).toUpperCase() +
+        ' ' + first.getDate() + '–' + last.getDate() + ', ' + first.getFullYear()
+      : first.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }).toUpperCase() +
+        ' – ' +
+        last.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase();
+
+    document.getElementById('date-weekday').textContent = 'Week of';
+    document.getElementById('date-weekday').style.color = '';
+    document.getElementById('date-str').textContent = rangeStr;
+    document.getElementById('job-count').textContent = '';
+    document.getElementById('job-count').style.color = '';
+
+    wrap.innerHTML = '<div class="empty-state"><p>Loading…</p></div>';
+
+    const results = await Promise.all(weekDates.map(d => fetchDateData(formatDateKey(d))));
+    renderWeekView(weekDates, results);
+
+    document.getElementById('last-updated').textContent =
+      'Updated ' + new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function renderWeekView(weekDates, results) {
+    const wrap = document.getElementById('table-wrap');
+
+    function cell(val, cls) {
+      const empty = !val || val.trim().toLowerCase() === 'n/a' || val.trim() === '—';
+      return `<td class="${[cls, empty ? 'muted' : ''].filter(Boolean).join(' ')}">${empty ? 'N/A' : val}</td>`;
+    }
+
+    let totalJobs = 0;
+    let html = `<table class="compact"><thead><tr>
+      <th>Company</th><th>Production</th><th>DP</th><th>AC</th><th>Tech</th><th>Order</th><th>Area</th>
+    </tr></thead><tbody>`;
+
+    weekDates.forEach((date, i) => {
+      const jobs   = results[i]?.jobs || [];
+      totalJobs   += jobs.length;
+      const today  = isToday(date);
+      const noJobs = jobs.length === 0;
+      const label  = date.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' }).toUpperCase();
+      const hdrCls = ['day-header', today && 'is-today', noJobs && 'no-jobs'].filter(Boolean).join(' ');
+      const cnt    = noJobs ? 'No jobs' : (jobs.length + ' job' + (jobs.length !== 1 ? 's' : ''));
+
+      html += `<tr class="${hdrCls}"><td colspan="7">${label}&nbsp;&nbsp;&nbsp;${cnt}</td></tr>`;
+
+      if (!noJobs) {
+        sortByArea(jobs).forEach((j, idx) => {
+          const esc = (j.order || '').replace(/'/g, "\\'");
+          html += `<tr style="animation-delay:${idx * 0.03}s">
+            <td>${j.company || 'N/A'}</td>
+            ${cell(j.production, 'production')}
+            ${cell(j.dp, '')}
+            ${cell(j.ac, '')}
+            ${cell(j.tech, 'tech')}
+            <td class="order" onclick="showBarcode('${esc}')">${j.order || '—'}</td>
+            <td class="area">${j.area || '—'}</td>
+          </tr>`;
+        });
+      }
+    });
+
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    wrap.classList.remove('stretch');
+    document.getElementById('job-count').textContent =
+      totalJobs + ' job' + (totalJobs !== 1 ? 's' : '') + ' this week';
+  }
+
+  // ── MONTH VIEW ────────────────────────────────────────────────────────────
+  function getMonthDates(date) {
+    const y = date.getFullYear(), mo = date.getMonth();
+    const first = new Date(y, mo, 1);
+    const last  = new Date(y, mo + 1, 0);
+
+    const startDow = (first.getDay() + 6) % 7;
+    const start    = new Date(first);
+    start.setDate(first.getDate() - startDow);
+
+    const endDow = (last.getDay() + 6) % 7;
+    const end    = new Date(last);
+    if (endDow < 6) end.setDate(last.getDate() + (6 - endDow));
+
+    const dates = [];
+    const d = new Date(start);
+    while (d <= end) { dates.push(new Date(d)); d.setDate(d.getDate() + 1); }
+    return dates;
+  }
+
+  async function loadMonthView() {
+    const month      = selectedDate.getMonth();
+    const monthDates = getMonthDates(selectedDate);
+    const wrap       = document.getElementById('table-wrap');
+    if (pageTimer) clearInterval(pageTimer);
+    wrap.classList.remove('week-scroll');
+
+    const monthName = selectedDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }).toUpperCase();
+    document.getElementById('date-weekday').textContent = '';
+    document.getElementById('date-weekday').style.color = '';
+    document.getElementById('date-str').textContent = monthName;
+    document.getElementById('job-count').textContent = '';
+    document.getElementById('job-count').style.color = '';
+
+    const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    let html = '<div class="month-grid"><div class="month-header-row">';
+    DAY_LABELS.forEach(l => { html += `<div class="month-day-label">${l}</div>`; });
+    html += '</div>';
+
+    for (let i = 0; i < monthDates.length; i += 7) {
+      html += '<div class="month-row">';
+      for (let j = 0; j < 7 && i + j < monthDates.length; j++) {
+        const d  = monthDates[i + j];
+        const ds = formatDateKey(d);
+        const inMonth = d.getMonth() === month;
+        const today   = isToday(d);
+        const cls = ['month-cell', !inMonth && 'other-month', today && 'is-today'].filter(Boolean).join(' ');
+        html += `<div class="${cls}" id="cell-${ds}" onclick="selectMonthDay('${ds}')">
+          <div class="month-cell-date">${d.getDate()}</div>
+          <div class="month-cell-count loading" id="cnt-${ds}">…</div>
+          <div class="month-cell-jobs" id="jbs-${ds}"></div>
+        </div>`;
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+    wrap.innerHTML = html;
+    wrap.classList.remove('stretch');
+
+    let totalJobs = 0, loaded = 0;
+    const inMonthCount = monthDates.filter(d => d.getMonth() === month).length;
+
+    monthDates.forEach(d => {
+      const ds = formatDateKey(d);
+      fetchDateData(ds).then(data => {
+        const cntEl = document.getElementById('cnt-' + ds);
+        const jbsEl = document.getElementById('jbs-' + ds);
+        if (!cntEl) return;
+        const jobs = data?.jobs || [];
+
+        if (jobs.length === 0) {
+          cntEl.textContent = '';
+          cntEl.className   = 'month-cell-count';
+        } else {
+          cntEl.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '');
+          cntEl.className   = 'month-cell-count has-jobs';
+          if (jbsEl) jbsEl.innerHTML = jobs.slice(0, 2).map(j =>
+            `<div class="month-job-pill">${j.company || ''}</div>`
+          ).join('') + (jobs.length > 2 ? `<div class="month-job-pill">+${jobs.length - 2} more</div>` : '');
+        }
+
+        if (d.getMonth() === month) {
+          totalJobs += jobs.length;
+          if (++loaded === inMonthCount) {
+            document.getElementById('job-count').textContent =
+              totalJobs > 0 ? totalJobs + ' job' + (totalJobs !== 1 ? 's' : '') + ' this month' : '';
+          }
+        }
+      });
+    });
+
+    document.getElementById('last-updated').textContent =
+      'Updated ' + new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function selectMonthDay(dateStr) {
+    const [y, mo, d] = dateStr.split('-');
+    selectedDate = new Date(+y, +mo - 1, +d);
+    viewMode = 'day';
+    updateViewButtons();
+    loadView();
+  }
+
+  // ── PAGINATION ────────────────────────────────────────────────────────────
+  function calcRowsPerPage() {
+    const wrap  = document.getElementById('table-wrap');
+    const wrapH = wrap.clientHeight;
+    const thead = wrap.querySelector('thead');
+    const headH = thead ? thead.offsetHeight : 60;
+    const firstRow = wrap.querySelector('tbody tr');
+    const rowH  = firstRow ? firstRow.offsetHeight : 90;
+    return Math.max(1, Math.floor((wrapH - headH) / rowH));
+  }
+
+  function sortByArea(jobs) {
+    function areaRank(val) {
+      if (!val || val.trim().toLowerCase() === 'n/a') return 999;
+      const raw = val.trim().toUpperCase();
+      const rmMatch = raw.match(/^RM\s*(\d+)/);
+      if (rmMatch) return parseInt(rmMatch[1]) - 1;
+      const first = raw.split(/[,\/\s&+]+/)[0].trim();
+      const letter = first.match(/^[A-F]$/);
+      if (letter) return 2 + first.charCodeAt(0) - 65;
+      return 100 + first.charCodeAt(0);
+    }
+    return [...jobs].sort((a, b) => areaRank(a.area) - areaRank(b.area));
+  }
+
+  function buildTable(jobs) {
+    function cell(val, cls) {
+      const isEmpty = !val || val.trim().toLowerCase() === 'n/a' || val.trim() === '—';
+      const classes = [cls, isEmpty ? 'muted' : ''].filter(Boolean).join(' ');
+      return `<td class="${classes}">${isEmpty ? 'N/A' : val}</td>`;
+    }
+
+    const rows = jobs.map((j, i) => `
+      <tr style="animation-delay:${i * 0.05}s">
+        <td class="company">${j.company || 'N/A'}</td>
+        ${cell(j.production, 'production')}
+        ${cell(j.dp, '')}
+        ${cell(j.ac, '')}
+        ${cell(j.tech, 'tech')}
+        <td class="order" onclick="showBarcode('${(j.order || '').replace(/'/g, "\\'")}')">${j.order || '—'}</td>
+        <td class="area">${j.area || '—'}</td>
+      </tr>`).join('');
+
+    const todaySection = currentDaysAhead > 0 ? `
+      <tr class="section-header"><td colspan="7">Today&nbsp;&nbsp;—&nbsp;&nbsp;No jobs scheduled</td></tr>
+      <tr class="section-header upcoming"><td colspan="7">${currentUpcomingDate}</td></tr>
+    ` : '';
+
+    return `
+      <table>
+        <thead><tr>
+          <th>Company</th><th>Production</th><th>DP</th><th>AC</th><th>Tech</th><th>Order</th><th>Area</th>
+        </tr></thead>
+        <tbody>${todaySection}${rows}</tbody>
+      </table>`;
+  }
+
+  function showPage(index, silent) {
+    const wrap       = document.getElementById('table-wrap');
+    const rpp        = calcRowsPerPage();
+    const page       = allJobs.slice(index * rpp, index * rpp + rpp);
+    const totalPages = Math.ceil(allJobs.length / rpp);
+
+    if (silent) {
+      wrap.style.transition = 'none';
+      wrap.style.opacity    = '1';
+      wrap.innerHTML = buildTable(page);
+      wrap.classList.toggle('stretch', page.length >= 4);
+      if (totalPages > 1)
+        document.getElementById('job-count').textContent =
+          `${allJobs.length} jobs · ${index + 1} / ${totalPages}`;
+      return;
+    }
+
+    wrap.style.transition = 'opacity 0.6s ease';
+    wrap.style.opacity    = '0';
+    setTimeout(() => {
+      wrap.innerHTML = buildTable(page);
+      wrap.style.opacity = '1';
+      wrap.classList.toggle('stretch', page.length >= 4);
+      if (totalPages > 1)
+        document.getElementById('job-count').textContent =
+          `${allJobs.length} jobs · ${index + 1} / ${totalPages}`;
+    }, 600);
+  }
+
+  function startPagination(silent) {
+    if (pageTimer) clearInterval(pageTimer);
+    allJobs = sortByArea(allJobs);
+    const rpp        = calcRowsPerPage();
+    const totalPages = Math.ceil(allJobs.length / rpp);
+
+    if (totalPages <= 1) { showPage(0, silent); return; }
+
+    pageIndex = 0;
+    showPage(pageIndex, silent);
+    pageTimer = setInterval(() => {
+      pageIndex = (pageIndex + 1) % totalPages;
+      showPage(pageIndex);
+    }, 6000);
+  }
+
+  // ── DEMO MODE ─────────────────────────────────────────────────────────────
+  const ALL_DEMO_JOBS = [
+    { company: 'Warner Bros.',           production: 'Presumed Innocent S2',   order: 'LA51502', tech: 'Bahadir', area: 'D',    dp: 'Tari Segal',            ac: 'Jeremy Hill'    },
+    { company: 'Whisperwood LLC',        production: 'Once Loved',             order: 'LA51541', tech: 'Elliott', area: 'F',    dp: 'Marcus Patterson',      ac: 'N/A'            },
+    { company: 'AGP NYC',                production: 'KKHloud',                order: 'LA51550', tech: 'Bahadir', area: 'Rm 1', dp: 'Chevy Tyler',           ac: 'Lauren Peele'   },
+    { company: 'JH Artist Group',        production: 'JH Artist: Lunchables',  order: 'LA51472', tech: 'Elliott', area: 'A',    dp: 'Steve Moss, F. Ricart', ac: 'Dennis McDonald'},
+    { company: 'Mane Co.',               production: 'Mane Co / TJ Maxx',      order: 'LA51509', tech: 'Elliott', area: 'B',    dp: 'Franklin Ricart',       ac: 'N/A'            },
+    { company: '8th Street Productions', production: 'General Mills',          order: 'LA51526', tech: 'Bahadir', area: 'Rm 2', dp: 'N/A',                  ac: 'N/A'            },
+    { company: 'Fellow Media',           production: 'N/A',                    order: 'LA51512', tech: 'Bahadir', area: 'E',    dp: 'Matt Ryan',             ac: 'Danny Kim'      },
+    { company: 'Crawford & Co',          production: 'NYX',                    order: 'LA51578', tech: 'Elliott', area: 'C',    dp: 'Maddy Talias',          ac: 'N/A'            },
+    { company: 'Netflix',                production: 'Untitled Feature',       order: 'LA51600', tech: 'Bahadir', area: 'G',    dp: 'Roger Deakins',         ac: 'N/A'            },
+    { company: 'A24',                    production: 'Summer Short',           order: 'LA51601', tech: 'Elliott', area: 'H',    dp: 'N/A',                  ac: 'N/A'            },
+    { company: 'Paramount Pictures',     production: 'Top Gun 3',              order: 'LA51602', tech: 'Bahadir', area: 'Rm 1', dp: 'Claudio Miranda',       ac: 'James Chen'     },
+    { company: 'Blumhouse',              production: 'Untitled Horror',        order: 'LA51603', tech: 'Elliott', area: 'D',    dp: 'N/A',                  ac: 'Sarah Park'     },
+  ];
+
+  const DEMO_SCENARIOS = {
+    'Single Job': { jobs: ALL_DEMO_JOBS.slice(0, 1), daysAhead: 0 },
+    '2 Jobs':     { jobs: ALL_DEMO_JOBS.slice(0, 2), daysAhead: 0 },
+    '4 Jobs':     { jobs: ALL_DEMO_JOBS.slice(0, 4), daysAhead: 0 },
+    'Full Day':   { jobs: ALL_DEMO_JOBS.slice(0, 8), daysAhead: 0 },
+    'Paginated':  { jobs: ALL_DEMO_JOBS,              daysAhead: 0 },
+    'Tomorrow':   { jobs: ALL_DEMO_JOBS.slice(0, 4), daysAhead: 1 },
+    'Next Week':  { jobs: ALL_DEMO_JOBS.slice(0, 6), daysAhead: 5 },
+    'No Jobs':    { jobs: [],                         daysAhead: 0 },
+    'All N/A':    { jobs: ALL_DEMO_JOBS.slice(0,4).map(j => ({...j, dp:'N/A', ac:'N/A', production:'N/A'})), daysAhead: 0 },
+  };
+
+  let demoMode  = false;
+  let demoPanel = null;
+
+  function loadDemoScenario(name) {
+    const s = DEMO_SCENARIOS[name];
+    if (!s) return;
+
+    document.querySelectorAll('.demo-btn').forEach(b => {
+      b.style.background  = b.dataset.name === name ? 'var(--red)' : 'none';
+      b.style.color       = b.dataset.name === name ? '#fff'       : 'var(--mid)';
+      b.style.borderColor = b.dataset.name === name ? 'var(--red)' : 'var(--light)';
+    });
+
+    allJobs          = s.jobs;
+    currentDaysAhead = s.daysAhead;
+
+    const now = new Date();
+    const displayDate = new Date(now);
+    displayDate.setDate(now.getDate() + s.daysAhead);
+
+    const weekdayEl  = document.getElementById('date-weekday');
+    const jobCountEl = document.getElementById('job-count');
+    const wrap       = document.getElementById('table-wrap');
+
+    weekdayEl.textContent = now.toLocaleDateString('en-US', { weekday: 'long' }).toUpperCase();
+    document.getElementById('date-str').textContent =
+      now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }).toUpperCase();
+
+    if (!s.jobs.length) {
+      if (pageTimer) clearInterval(pageTimer);
+      wrap.innerHTML = `<div class="empty-state"><p>No jobs scheduled this week</p></div>`;
+      jobCountEl.textContent = ''; weekdayEl.style.color = ''; jobCountEl.style.color = '';
+      document.getElementById('last-updated').textContent = 'Demo mode · ' + name;
+      return;
+    }
+
+    if (s.daysAhead > 0) {
+      currentUpcomingDate = displayDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase();
+      weekdayEl.style.color  = '#b87000';
+      jobCountEl.style.color = '#b87000';
+      jobCountEl.textContent = s.jobs.length + ' upcoming job' + (s.jobs.length !== 1 ? 's' : '');
+    } else {
+      currentUpcomingDate    = '';
+      weekdayEl.style.color  = '';
+      jobCountEl.style.color = '';
+      jobCountEl.textContent = s.jobs.length + ' job' + (s.jobs.length !== 1 ? 's' : '') + ' today';
+    }
+
+    document.getElementById('last-updated').textContent = 'Demo mode · ' + name;
+    startPagination(true);
+  }
+
+  function toggleDemo() {
+    demoMode = !demoMode;
+    const btn = document.getElementById('demo-toggle');
+
+    if (demoMode) {
+      viewMode = 'day';
+      updateViewButtons();
+      btn.textContent = 'Live';
+      btn.style.borderColor = 'var(--red)';
+      btn.style.color = 'var(--red)';
+
+      demoPanel = document.createElement('div');
+      demoPanel.id = 'demo-panel';
+      demoPanel.style.cssText = `
+        position:fixed;bottom:60px;right:56px;background:var(--bg);
+        border:1px solid var(--border);box-shadow:0 8px 32px rgba(0,0,0,0.12);
+        border-radius:4px;padding:16px;display:flex;flex-direction:column;
+        gap:8px;z-index:999;min-width:180px;`;
+
+      const label = document.createElement('div');
+      label.textContent = 'Scenario';
+      label.style.cssText = 'font-size:0.75rem;font-weight:600;letter-spacing:0.15em;text-transform:uppercase;color:var(--mid);margin-bottom:4px;font-family:Barlow Condensed,sans-serif;';
+      demoPanel.appendChild(label);
+
+      Object.keys(DEMO_SCENARIOS).forEach(name => {
+        const b = document.createElement('button');
+        b.textContent   = name;
+        b.dataset.name  = name;
+        b.className     = 'demo-btn';
+        b.onclick       = () => loadDemoScenario(name);
+        b.style.cssText = `background:none;border:1px solid var(--light);color:var(--mid);
+          font-family:'Barlow Condensed',sans-serif;font-size:1rem;font-weight:500;
+          letter-spacing:0.06em;padding:6px 12px;cursor:pointer;border-radius:2px;
+          text-align:left;transition:all 0.15s;`;
+        demoPanel.appendChild(b);
+      });
+
+      document.body.appendChild(demoPanel);
+      loadDemoScenario('Full Day');
+
+    } else {
+      btn.textContent = 'Demo';
+      btn.style.borderColor = 'var(--light)';
+      btn.style.color = 'var(--light)';
+      if (demoPanel) { demoPanel.remove(); demoPanel = null; }
+      lastJobsHash = '';
+      selectedDate = todayMidnight();
+      loadView();
+    }
+  }
+
+  // ── THEME TOGGLE ──────────────────────────────────────────────────────────
+  function toggleTheme() {
+    const isDark = document.body.classList.toggle('dark');
+    document.getElementById('theme-toggle').textContent = isDark ? '☀' : '☽';
+    try { localStorage.setItem('oni-theme', isDark ? 'dark' : 'light'); } catch(e) {}
+  }
+
+  try {
+    const saved = localStorage.getItem('oni-theme');
+    if (saved === 'light') {
+      document.getElementById('theme-toggle').textContent = '☽';
+    } else {
+      document.body.classList.add('dark');
+      document.getElementById('theme-toggle').textContent = '☀';
+    }
+  } catch(e) {
+    document.body.classList.add('dark');
+  }
+
+  // ── BARCODE MODAL ─────────────────────────────────────────────────────────
+  function showBarcode(order) {
+    if (!order) return;
+    document.getElementById('barcode-label').textContent = order;
+    JsBarcode('#barcode', order, { format: 'CODE128', width: 3, height: 80, displayValue: false, margin: 0 });
+    document.getElementById('barcode-modal').classList.add('open');
+  }
+
+  function closeBarcodeModal() {
+    document.getElementById('barcode-modal').classList.remove('open');
+  }
+
+  // ── KEYBOARD ──────────────────────────────────────────────────────────────
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeBarcodeModal(); return; }
+    if (document.getElementById('barcode-modal').classList.contains('open')) return;
+    if (!demoMode) {
+      if (e.key === 'ArrowLeft')  changeDate(-1);
+      if (e.key === 'ArrowRight') changeDate(1);
+    }
+  });
+
+  // ── AUTO-HIDE CURSOR ──────────────────────────────────────────────────────
+  let cursorTimer;
+  function resetCursorTimer() {
+    document.body.classList.remove('hide-cursor');
+    clearTimeout(cursorTimer);
+    cursorTimer = setTimeout(() => document.body.classList.add('hide-cursor'), 3000);
+  }
+  document.addEventListener('mousemove', resetCursorTimer);
+  resetCursorTimer();
+
+  // ── TEMPERATURE ───────────────────────────────────────────────────────────
+  function fetchTemp() {
+    fetch('https://api.open-meteo.com/v1/forecast?latitude=33.9875&longitude=-118.3891&current=temperature_2m,apparent_temperature&temperature_unit=fahrenheit&wind_speed_unit=mph')
+      .then(r => r.json())
+      .then(data => {
+        const temp = Math.round(data.current.temperature_2m);
+        document.getElementById('temp').textContent = temp + '°F';
+      })
+      .catch(() => {});
+  }
+  fetchTemp();
+  setInterval(fetchTemp, 10 * 60 * 1000);
+
+  // ── INIT ──────────────────────────────────────────────────────────────────
+  loadView();
+
+  setInterval(() => {
+    if (demoMode) return;
+    if (viewMode === 'day') {
+      delete dataCache[formatDateKey(selectedDate)];
+      loadDayView();
+    } else if (viewMode === 'week') {
+      getWeekDates(selectedDate).forEach(d => delete dataCache[formatDateKey(d)]);
+      loadWeekView();
+    }
+    // Month: skip auto-refresh to avoid hammering the API
+  }, 60000);
+
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if      (viewMode === 'day'   && allJobs.length) startPagination(true);
+      else if (viewMode === 'week')  loadWeekView();
+      else if (viewMode === 'month') loadMonthView();
+    }, 200);
+  });
+</script>
+</body>
+</html>

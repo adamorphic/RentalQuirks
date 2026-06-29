@@ -350,17 +350,17 @@
       if (item_id && deactivated_identifier == 'X' && validate(active_barcode)) {
         // Update each asset with activated barcode values
         RQ.api.update_asset(item_id, { BarCode: active_barcode })
-          .then(json_or_error => {
-            if (typeof json_or_error == 'string' || !(json_or_error['BarCode'])) {
-              console.log("update_asset failed: " + json_or_error, queue_item);
+          .then(updated => {
+            if (!updated?.['BarCode']) {
+              console.log("update_asset failed: unexpected response", updated, queue_item);
+              return;
             }
-            else {
-              // Update the barcode value in the queue list once the update is confirmed by the backend
-              queue_item.textContent = json_or_error['BarCode'];
-              queue_item.dataset.isValid = true; // Value validated above
-              console.log('updated', json_or_error);
-            }
-          });
+            // Update the barcode value in the queue list once the update is confirmed by the backend
+            queue_item.textContent = updated['BarCode'];
+            queue_item.dataset.isValid = true; // Value validated above
+            console.log('updated', updated);
+          })
+          .catch(err => console.log("update_asset failed:", err, queue_item));
       }
     });
   }
@@ -381,16 +381,16 @@
       if (item_id && validate(barcode)) {
         // Update each asset's barcode values with an 'X' appended, to identify the barcode as deactivated
         RQ.api.update_asset(item_id, { BarCode: barcode + "X" })
-          .then(json_or_error => {
-            if (typeof json_or_error == 'string' || !(json_or_error['BarCode'])) {
-              console.log("update_asset failed: " + json_or_error, queue_item);
+          .then(updated => {
+            if (!updated?.['BarCode']) {
+              console.log("update_asset failed: unexpected response", updated, queue_item);
+              return;
             }
-            else {
-              queue_item.textContent = json_or_error['BarCode'];
-              queue_item.dataset.isValid = false; // Value is invalid because of 'X', the deactivated identifier
-              console.log('updated', json_or_error);
-            }
-          });
+            queue_item.textContent = updated['BarCode'];
+            queue_item.dataset.isValid = false; // Value is invalid because of 'X', the deactivated identifier
+            console.log('updated', updated);
+          })
+          .catch(err => console.log("update_asset failed:", err, queue_item));
       }
     });
   }

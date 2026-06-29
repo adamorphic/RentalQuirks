@@ -33,15 +33,24 @@
             "credentials": "include"
         };
 
+        // Resolves a fetch Response to its parsed JSON, or rejects with an Error on a
+        // non-200 status. Use as `.then(json_or_throw("Get Asset"))` so callers can rely
+        // on the resolved value always being the response body, and handle failures in
+        // a single .catch() rather than type-checking the resolved value.
+        const json_or_throw = (label) => (res) => {
+            if (res.status === 200) return res.json();
+            throw new Error(`${label} failed with HTTP response ${res.status}`);
+        };
+
         //TODO: this should probably be replaced by something more generic like get_id_from_code
         /**Gets a RW Asset (any item that is tracked individually, such as by barcode)
          * @param item_id The ItemID string that identifies the asset
-         * @returns a Promise that resolves to a JSON representation of the Asset object, or
-         *          a String describing an error that occurred.
+         * @returns a Promise that resolves to a JSON representation of the Asset object,
+         *          or rejects with an Error if the request fails.
          */
         RQ.api.get_asset = function (item_id) {
             return fetch(RW_URL + "api/v1/item/" + item_id, standard_fetch)
-                   .then(res => res.status === 200 ? res.json() : "Error: Get Asset failed with HTTP response " + res.status);
+                   .then(json_or_throw("Get Asset"));
         };
 
         /**
@@ -49,8 +58,8 @@
          * @param item_id The ItemID string that identifies the asset
          * @param payload an object of {"key":"value"} pairs where the keys are datafield names, 
          *                and values are the new values for the field
-         * @returns a Promise that resolves to a JSON representation of the updated Asset object, or
-         *          a String describing an error that occurred.
+         * @returns a Promise that resolves to a JSON representation of the updated Asset object,
+         *          or rejects with an Error if the request fails.
          */
         RQ.api.update_asset = function (item_id, payload) {
             // Payload requires ItemId even though it's also specified in the URL
@@ -59,7 +68,7 @@
                 ...standard_fetch,
                 "body": JSON.stringify(payload),
                 "method": "PUT"
-            }).then(res => res.status === 200 ? res.json() : "Error: Update Asset failed with HTTP response " + res.status);
+            }).then(json_or_throw("Update Asset"));
         };
 
         /**
@@ -67,8 +76,8 @@
          * @param inventory_id The InventoryID string that identifies the rental item
          * @param payload an object of {"key":"value"} pairs where the keys are datafield names, 
          *                and values are the new values for the field
-         * @returns a Promise that resolves to a JSON representation of the updated Inventory Item object, or
-         *          a String describing an error that occurred.
+         * @returns a Promise that resolves to a JSON representation of the updated Inventory Item object,
+         *          or rejects with an Error if the request fails.
          */
         RQ.api.update_rental_inventory_item = function (inventory_id, payload) {
             // Payload requires InventoryId even though it's also specified in the URL
@@ -77,7 +86,7 @@
                 ...standard_fetch,
                 "body": JSON.stringify(payload),
                 "method": "PUT"
-            }).then(res => res.status === 200 ? res.json() : "Error: Update Rental Inventory Item failed with HTTP response " + res.status);
+            }).then(json_or_throw("Update Rental Inventory Item"));
         };
         
         /**
@@ -98,18 +107,18 @@
             if (warehouse_id === undefined) {
                 throw new Error("Could not determine WarehouseId to update pricing.");
             }
-            RQ.api.get_id_from_code(module_name, icode).then((item_id) => {
+            return RQ.api.get_id_from_code(module_name, icode).then((item_id) => {
                 let payload = {
                     "InventoryId": item_id,
                     "WarehouseId": warehouse_id,
                     ...warehouse_pricing
                 };
-        
-                fetch(RW_URL + "api/v1/pricing/" + item_id + "~" + warehouse_id, {
+
+                return fetch(RW_URL + "api/v1/pricing/" + item_id + "~" + warehouse_id, {
                     ...standard_fetch,
                     "body": JSON.stringify(payload),
                     "method": "PUT"
-                }).then(res => res.status === 200 ? res.json() : "Error: Update Pricing failed with HTTP response " + res.status);
+                }).then(json_or_throw("Update Pricing"));
             });
         };
 
@@ -211,10 +220,7 @@
             let querystring = encodeURI(`filter={"Field":"${code_name}","Op":"=","Value":"${code_value}"}`);
 
             return fetch(RW_URL + controller.apiurl + "?" + querystring, standard_fetch)
-                .then(res => {
-                    if (res.status == 200) return res.json();
-                    throw `Error: ${code_name} lookup failed with HTTP response ${res.status}`;
-                })
+                .then(json_or_throw(`${code_name} lookup`))
                 .then(res => res?.Items?.[0]);
             //TODO: Should we make sure that (res.TotalItems == 1)?
         };

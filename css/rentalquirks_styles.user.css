@@ -19,20 +19,6 @@
   .app-title .rwpurple {
      position: relative;
   }
-  .app-title .rwpurple::after {
-     content: "Qui";
-     color: darkorange;
-     font-size: .8em;
-     transform: rotate(-7deg);
-     position: absolute;
-     left: .1em;
-     top: .15em;
-     height: 1.4em;
-     padding-top: .2em;
-
-     background: linear-gradient(-13deg, hsl(56deg 100% 50.5%) 0%, transparent 19%), linear-gradient(180deg, hsl(59 100% 52%) 8%, hsl(58 100% 60%) 14%, hsl(55deg 93.34% 52%) 52%, hsl(55deg 85.7% 48.85%) 100%);
-     box-shadow: 0.5px 1px 2px 0px #00000080;
-  }
 
   /* rwver should be filled by Javascript if Tampermonkey loads it properly */
   .app-title .bgothm[data-rwver]::before {
@@ -63,8 +49,25 @@
   }
   
   /* QuikNav search box */
+  #rq-quiknav {
+    padding-left: 2.1em;
+  }
+
+  .fwformfield-control > .rq-quiknav-icon {
+    position: absolute;
+    left: 0.45em;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #666;
+    font-size: 1.05em;
+    line-height: 1;
+    pointer-events: none;
+    z-index: 1;
+  }
+
   #rq-quiknav:focus + .rq-kbd-shortcut {
     opacity: 0;
+    pointer-events: none;
   }
 
   #rq-quiknav-popup {
@@ -509,10 +512,13 @@
    left: calc(50% - 4.5em);
  }
  
+
  @media print {
   .rquirks.noprint {
     display: none !important;
   }
  }
+
+ 
    
 }

@@ -1,81 +1,44 @@
 'use strict';
 // window.RentalQuirks is where RentalQuirks saves any shared global context
 window.RentalQuirks = {};
-RentalQuirks.runAlways = []; // Scripts are run coninuously, at interval specified by pollRateMS. If any function returns true, all subsequent functions are skipped for that iteration.
-RentalQuirks.runOnPage = []; // Scripts are validated on page navigation with testPath(path), and then valid scripts have runScript() run at interval, or until runScript returns true. 
-RentalQuirks.pollRateMS = 1000;
+RentalQuirks.runAlways = []; // Scripts are run on every DOM mutation. If any function returns true, all subsequent functions are skipped for that batch.
+RentalQuirks.runOnPage = []; // Scripts are validated on page navigation with testPath(path), and then valid scripts have runScript() run on DOM mutations until runScript returns true.
 RentalQuirks.navTimestamp = 0;
 
 // Since RentalWorks (rentalworks.cloud) acts as a single-page application, we need to make
 // an extra effort to apply javascript to new pages as we navigate to them.
-// This will be sufficient for some scripts, but RentalWorks URLs are only as specific 
-// as the Module name, so other strategies (like MutationObservers) are necessary (and 
-// available further on in this file).
-(function (runAlways, runOnPage, intervalPollRate) {
+// Navigation is detected via hashchange/popstate events. runOnPage scripts that haven't
+// completed yet are retried on DOM mutations (via MutationObserver) rather than a polling interval.
+(function (runAlways, runOnPage) {
   'use strict';
-  let oldScriptCount = runOnPage.length;
-  let oldLocation = "";
-  let pageScripts,
-    runningPageScripts,
-    numRunningPageScripts;
-  let currentPollRate = intervalPollRate();
-  let intervalID = setInterval(function runPollScripts () {
-    // Run all runAlways functions in order. If any one of them returns true,
-    // all subsequent scripts are skipped (including the remainder of runAlways).
-    let shortCircuit = runAlways.some((item)=>item());
-    if (shortCircuit) return;
+  let pageScripts = [];
 
-    // Run all runOnPage scripts that match the current URL path.
-    // If a script was successful and need not run again, runScript() returns true.
-    let resetScripts = (location.href != oldLocation);
-    if (runOnPage.length !== oldScriptCount) {
-      // Rerun all scripts if new ones are added. Only happens as the page and scripts are loading.
-      oldScriptCount = runOnPage.length;
-      resetScripts = true;
-    }
-    if (resetScripts) {
-      oldLocation = location.href;
-      RentalQuirks.navTimestamp = Date.now();
-      let path = location.pathname.slice(1) + location.search + location.hash; //Remove the leading slash
-      pageScripts = runOnPage.filter(script => script.testPath(path));
-      numRunningPageScripts = pageScripts.length;
-      runningPageScripts = true;
-    }
+  function onNavigate() {
+    RentalQuirks.navTimestamp = Date.now();
+    let path = location.pathname.slice(1) + location.search + location.hash; // Remove the leading slash
+    pageScripts = runOnPage.filter(script => script.testPath(path));
+    tryRun();
+  }
 
-    if (runningPageScripts) {
-      if (pageScripts.length) {
-        if (numRunningPageScripts != pageScripts.length) {
-          numRunningPageScripts = pageScripts.length;
-          console.log('Running ' + numRunningPageScripts + ' active page scripts');
-        }
-      }
-      else {
-        console.log('All page scripts completed');
-      }
-    }
+  function tryRun() {
+    if (runAlways.some(item => item())) return;
+    pageScripts = pageScripts.filter(script => !script.runScript());
+  }
 
-    if (pageScripts.length) {
-      // Run all scripts and keep the ones that are not finished (return false)
-      pageScripts = pageScripts.filter(script => !script.runScript());
-    }
-    else {
-      runningPageScripts = false;
-    }
+  window.addEventListener('hashchange', onNavigate);
+  window.addEventListener('popstate', onNavigate);
 
-    // Change polling rate if it's been adjusted, limit to no less than 30ms
-    let newPollRate = intervalPollRate();
-    if (newPollRate != currentPollRate && newPollRate > 30) {
-      currentPollRate = newPollRate;
-      clearInterval(intervalID);
-      intervalID = setInterval(runPollScripts, currentPollRate);
-    }
+  // Retry pending scripts on DOM mutations (replaces polling interval).
+  // document.documentElement is used instead of document.body to avoid timing issues if
+  // this script runs before <body> exists.
+  new MutationObserver(() => {
+    if (pageScripts.length || runAlways.length) tryRun();
+  }).observe(document.documentElement, { childList: true, subtree: true });
 
-  }, currentPollRate);
-})(RentalQuirks.runAlways, RentalQuirks.runOnPage, getSetPollRate);
+  // Run immediately for the current page on load
+  onNavigate();
+})(RentalQuirks.runAlways, RentalQuirks.runOnPage);
 
-function getSetPollRate (newValue) {
-  return RentalQuirks.pollRateMS = newValue ?? RentalQuirks.pollRateMS;
-}
 function msSincePageNav() {
   return Date.now() - RentalQuirks.navTimestamp;
 }

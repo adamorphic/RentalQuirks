@@ -1,4 +1,3 @@
-//TODO: rq-kbd-shortcut becomes invisible when searchbox gains focus, but still exists and gets in the way of mouse clicks
 //TODO: allow filter text before or after itemcode
 
 (function (RQ) {
@@ -17,7 +16,8 @@
         quiknav_ui.outerHTML =
             `<div data-control="FwFormField" style="flex: 0 1 200px;height: 1.6em;font-size: 1rem;" class="fwcontrol fwformfield" data-type="text">
   <div class="fwformfield-control" style="position: relative;">
-    <input id="rq-quiknav" class="fwformfield-value" type="text" placeholder="QuikNav" autocomplete="off">
+    <span class="rq-quiknav-icon material-icons" aria-hidden="true">search</span>
+    <input id="rq-quiknav" class="fwformfield-value" type="text" placeholder="" aria-label="QuikNav" autocomplete="off">
     <span class="rq-kbd-shortcut" style="position: absolute; right: 0;">Ctrl+/</i>
   </div>
   <div id="rq-quiknav-popup" class="hidden" data-query-text="" style="max-height:0px;overflow-y:hidden;">
@@ -122,6 +122,12 @@
     function quiknav_focus (e) {
         // To handle quiknav searchbox focus and blur events
         RQ.quiknav.popup.classList.toggle('hidden', e.type == 'blur');
+        if (e.type == 'focus' && RQ.quiknav.modules) {
+            quiknav_apply_frecency_sort();
+            RQ.quiknav.popup.querySelectorAll('.quiknav-list-item').forEach(m => m.classList.remove('selected'));
+            RQ.quiknav.modules[0].classList.add('selected');
+            RQ.quiknav.modules[0].scrollIntoView({ block: "nearest" });
+        }
     }
 
     /**quiknav keydown event handler handles non-text keyboard entry, such as Enter, Escape,
@@ -131,7 +137,18 @@
         let modules = RQ.quiknav.modules;
         if (!e.repeat && e.key == 'Enter') {
             let selected_module = modules.find(m => m.classList.contains('selected'));
-            if (!selected_module) return;
+            if (!selected_module) {
+                // Check if a recent record item is selected instead
+                let selected_recent = RQ.quiknav.popup.querySelector('.rq-recent-item.selected');
+                if (selected_recent) {
+                    RQ.api.get_id_from_code(selected_recent.dataset.module, selected_recent.dataset.recordNumber)
+                        .then(id => { if (id) RQ.api.open_form_tab(selected_recent.dataset.module, id); });
+                    searchbox.blur();
+                    e.preventDefault();
+                }
+                return;
+            }
+            quiknav_track_open(selected_module.dataset.nav);
             let item_code_name = selected_module.dataset.code;
             let item_code_value = RQ.quiknav.popup.dataset.itemCode;
             
@@ -182,7 +199,11 @@
             e.preventDefault();
         }
         else if (e.key == 'Escape') {
-            if (searchbox.value.length) {
+            let quiknav_help = RQ.quiknav.popup.querySelector('.rq-help');
+            if (!quiknav_help.classList.contains('hidden')) {
+                quiknav_help.classList.add('hidden');
+            }
+            else if (searchbox.value.length) {
                 searchbox.value = "";
             }
             else {
@@ -191,11 +212,12 @@
             e.preventDefault();
         }
         else if (e.key == 'ArrowDown') {
-            // Select the next *visible* module, with wrapping
+            // Select the next *visible* item (includes recents), with wrapping
+            let items = [...RQ.quiknav.popup.querySelectorAll('.quiknav-list-item')];
             let select_index = undefined;
             let found_selected = false;
-            for (let i = 0; i < modules.length; i++) {
-                let cl = modules[i].classList;
+            for (let i = 0; i < items.length; i++) {
+                let cl = items[i].classList;
                 if (!cl.contains('hidden')) {
                     select_index ??= i; // Note the first match, in case we need to wrap around
                     if (found_selected) {
@@ -209,18 +231,19 @@
                     }
                 }
             }
-            let module = modules[select_index || 0];
-            module.classList.add('selected');
-            module.scrollIntoView({ block: "nearest" });
+            let item = items[select_index || 0];
+            item.classList.add('selected');
+            item.scrollIntoView({ block: "nearest" });
             e.preventDefault();
         }
         else if (e.key == 'ArrowUp') {
-            // Select the previous *visible* module, with wrapping
+            // Select the previous *visible* item (includes recents), with wrapping
+            let items = [...RQ.quiknav.popup.querySelectorAll('.quiknav-list-item')];
             let select_index = undefined;
             let found_selected = false;
             //@CutnPaste ArrowUp and ArrowDown are identical except for the direction of the for loop
-            for (let i = modules.length - 1; i >= 0; i--) {
-                let cl = modules[i].classList;
+            for (let i = items.length - 1; i >= 0; i--) {
+                let cl = items[i].classList;
                 if (!cl.contains('hidden')) {
                     select_index ??= i; // Note the first match, in case we need to wrap around
                     if (found_selected) {
@@ -234,18 +257,20 @@
                     }
                 }
             }
-            let module = modules[select_index || 0];
-            module.classList.add('selected');
-            module.scrollIntoView({ block: "nearest" });
+            let item = items[select_index || 0];
+            item.classList.add('selected');
+            item.scrollIntoView({ block: "nearest" });
             e.preventDefault();
         }
         else if (e.key == '?') {
-            // Show help
+            // Toggle help
             let quiknav_help = RQ.quiknav.popup.querySelector('.rq-help');
-            quiknav_help.classList.remove('hidden');
-            quiknav_help.scrollIntoView();
-            // Show all modules
-            RQ.quiknav.modules.forEach(module => module.classList.remove('hidden'));
+            const showing = quiknav_help.classList.toggle('hidden');
+            if (!showing) {
+                quiknav_help.scrollIntoView();
+                // Show all items while help is visible
+                RQ.quiknav.popup.querySelectorAll('.quiknav-list-item').forEach(item => item.classList.remove('hidden'));
+            }
             e.preventDefault();
         }
     }
@@ -253,7 +278,7 @@
     function quiknav_popup_click (e) {
         let clicked_item = e.target.closest('.quiknav-list-item');
         if (clicked_item && !clicked_item.classList.contains('selected')) {
-            RQ.quiknav.modules.forEach(module => module.classList.remove('selected'));
+            RQ.quiknav.popup.querySelectorAll('.quiknav-list-item').forEach(m => m.classList.remove('selected'));
             clicked_item.classList.add('selected');
         }
         if (e.type == 'dblclick') {
@@ -261,6 +286,35 @@
         }
         // Prevent taking focus away from searchbox
         e.preventDefault();
+    }
+
+    function quiknav_track_open(nav) {
+        let data = JSON.parse(localStorage.getItem('rq-module-frecency') ?? '{}');
+        let visits = data[nav] ?? [];
+        visits.push(Date.now());
+        if (visits.length > 50) visits = visits.slice(-50);
+        data[nav] = visits;
+        localStorage.setItem('rq-module-frecency', JSON.stringify(data));
+    }
+
+    function quiknav_apply_frecency_sort() {
+        let modules = RQ.quiknav.modules;
+        let popup = RQ.quiknav.popup;
+        let data = JSON.parse(localStorage.getItem('rq-module-frecency') ?? '{}');
+        let now = Date.now();
+        let HOUR = 3600000, DAY = 86400000, WEEK = 604800000, MONTH = 2592000000;
+        function score(nav) {
+            return (data[nav] ?? []).reduce((s, t) => {
+                let age = now - t;
+                if (age < HOUR)  return s + 100;
+                if (age < DAY)   return s + 70;
+                if (age < WEEK)  return s + 50;
+                if (age < MONTH) return s + 30;
+                return s + 10;
+            }, 0);
+        }
+        modules.sort((a, b) => score(b.dataset.nav) - score(a.dataset.nav));
+        modules.forEach(item => popup.appendChild(item));
     }
 
     /**Handles any change of the quicknav searchbox text, whether made by typing, pasting, or deleting text.
@@ -301,7 +355,7 @@
         if (!has_query_text && !has_item_code) {
             // Un-bold and show all entries
             modules.forEach(module => module.children[1].innerHTML = module.dataset.caption);
-            RQ.quiknav.popup.querySelector('.rq-no-results').classList.remove('hidden');
+            RQ.quiknav.popup.querySelector('.rq-no-results').classList.add('hidden');
             return;
         }
 
