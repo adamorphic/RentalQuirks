@@ -239,7 +239,7 @@
         for_child_added(app_body, '#moduleMaster', (new_module) => {
             let moduleName = new_module.dataset.module;
             let moduleScripts = RQ.runOnModuleChange.filter(script => script.test(moduleName));
-            console.log(`Running ${moduleScripts.length} module scripts`);
+            RQ.debug && console.log(`Running ${moduleScripts.length} module scripts`);
             moduleScripts.forEach(s => s.runScript());
         });
     }
@@ -258,7 +258,7 @@
             if (scripts.length == 0) return;
 
             let run_tab_scripts = function () {
-                console.log(`Running ${scripts.length} tab scripts`);
+                RQ.debug && console.log(`Running ${scripts.length} tab scripts`);
                 scripts.forEach(s => s.runScript(new_tab));
             };
             run_tab_scripts();

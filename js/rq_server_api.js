@@ -168,7 +168,10 @@
             else {
                 names = exceptional_names[module_name];
             }
-            names || console.warn(`Identifier field names are unknown for module "${module_name}"`);
+            // Quiet by default: QuikNav probes module_identifier_names() for every
+            // module in the nav (~100), most of which legitimately have no entry, so
+            // an unconditional warn here floods the console at startup.
+            if (!names && RQ.debug) console.warn(`Identifier field names are unknown for module "${module_name}"`);
             return names;
         };
 

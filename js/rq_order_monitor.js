@@ -15,6 +15,8 @@
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+  let warnedNoWebhook = false; // only warn once per session that the webhook URL is missing
+
   // Only one browser tab should poll at a time. Web Locks auto-release when the tab
   // closes, so the lock naturally migrates to another open tab. ifAvailable:true means
   // a tab that doesn't get the lock skips this cycle instead of queuing behind it.
@@ -233,9 +235,13 @@
       return;
     }
     if (!localStorage.getItem(WEBHOOK_KEY)) {
-      console.warn('[RQ Monitor] No webhook URL — paste your Apps Script URL into the Preps card settings');
+      if (!warnedNoWebhook) {
+        console.warn('[RQ Monitor] No webhook URL — paste your Apps Script URL into the Preps card settings');
+        warnedNoWebhook = true;
+      }
       return;
     }
+    warnedNoWebhook = false; // webhook present again; allow a fresh warning if it's later removed
 
     await runIfLeader('rq-order-monitor-poll', async () => {
       const jobs = await fetchPrepsOrders();

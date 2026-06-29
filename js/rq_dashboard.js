@@ -3941,31 +3941,63 @@
     return card;
   }
 
-  function loadMyPOs(forceRefresh = false) {
-    const body = document.getElementById('rq-card-body-mypos');
+  // ── Agent-driven sections (My Orders / My POs / My Quotes) ─────────
+  // These three share identical fetch/cache/render plumbing, differing only in
+  // the fields below. They use stale-while-revalidate: cached data renders
+  // immediately (no spinner) and a background refetch runs only when the cache
+  // is older than AGENT_CACHE_TTL (or forceRefresh is set). The spinner shows
+  // only on a cold cache; a failed background refresh leaves stale data in place.
+  const AGENT_SECTIONS = {
+    myorders: { agentKey: MY_ORDERS_AGENT_KEY, controller: 'OrderController',
+                module: 'Order',         icon: 'assignment',    numberField: 'OrderNumber',
+                hidden: ['CANCELLED', 'CLOSED'],            unavailable: 'Order module not available',          failed: 'Failed to load orders' },
+    mypos:    { agentKey: MY_POS_AGENT_KEY,    controller: 'PurchaseOrderController',
+                module: 'PurchaseOrder', icon: 'shopping_cart', numberField: 'PurchaseOrderNumber',
+                hidden: ['CLOSED', 'VOID'],                 unavailable: 'Purchase Order module not available', failed: 'Failed to load POs' },
+    myquotes: { agentKey: MY_QUOTES_AGENT_KEY, controller: 'QuoteController',
+                module: 'Quote',         icon: 'request_quote', numberField: 'QuoteNumber',
+                hidden: ['CANCELLED', 'CLOSED', 'ORDERED'], unavailable: 'Quote module not available',          failed: 'Failed to load quotes' },
+  };
+
+  // Pre-populate detailCache from list items so sort-by-date/amount works
+  // immediately and an open detail row picks up the latest Status without a refetch.
+  function prePopulateDetailCache(cfg, items) {
+    items.forEach(item => {
+      const key = cfg.module + ':' + item[cfg.numberField];
+      const _ex = detailCache.get(key);
+      if (_ex?.data?.record) _ex.data.record.Status = item.Status ?? _ex.data.record.Status;
+      else detailCache.set(key, { record: item });
+    });
+  }
+
+  function loadAgentSection(cardId, forceRefresh = false) {
+    const cfg = AGENT_SECTIONS[cardId];
+    const body = document.getElementById('rq-card-body-' + cardId);
     if (!body) return;
-    const agent = localStorage.getItem(MY_POS_AGENT_KEY);
+
+    const agent = localStorage.getItem(cfg.agentKey);
     if (!agent) {
       body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Set your agent name above</div>';
       return;
     }
 
-    const cached = getCachedSection('mypos');
-    if (!forceRefresh && cached) {
-      cached.items.forEach(item => {
-        const key = 'PurchaseOrder:' + item.PurchaseOrderNumber;
-        const _ex = detailCache.get(key);
-        if (_ex?.data?.record) _ex.data.record.Status = item.Status ?? _ex.data.record.Status;
-        else detailCache.set(key, { record: item });
-      });
-      renderBuiltinRows('mypos', cached.items, 'PurchaseOrder', 'shopping_cart');
-      return;
+    const cached = getCachedSection(cardId);
+    const fresh  = cached && (Date.now() - cached.fetchedAt) < AGENT_CACHE_TTL;
+
+    // Render cached data immediately, but skip the re-render if rows are already
+    // on screen (e.g. reopening the panel) to avoid needless flicker.
+    if (cached && !body.querySelector('.rq-card-row')) {
+      prePopulateDetailCache(cfg, cached.items);
+      renderBuiltinRows(cardId, cached.items, cfg.module, cfg.icon);
     }
 
-    body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Loading…</div>';
-    const controller = window.PurchaseOrderController;
+    // Hit the network only when forced or when the cache is stale/cold.
+    if (!forceRefresh && fresh) return;
+    if (!cached) body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Loading…</div>';
+
+    const controller = window[cfg.controller];
     if (!controller?.apiurl) {
-      body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Purchase Order module not available</div>';
+      if (!cached) body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">' + cfg.unavailable + '</div>';
       return;
     }
 
@@ -3976,26 +4008,23 @@
         'x-requested-with': 'XMLHttpRequest'
       }
     };
-
     const filter = encodeURIComponent(JSON.stringify({ Field: 'Agent', Op: '=', Value: agent.toUpperCase() }));
     fetch(RW_URL + controller.apiurl + '?pagesize=50&filter=' + filter, fetchOpts)
       .then(r => r.json())
       .then(r => {
-        const HIDDEN_STATUSES = new Set(['CLOSED', 'VOID']);
-        const items = (r?.Items ?? []).filter(i => !HIDDEN_STATUSES.has(i.Status));
-        items.forEach(item => {
-          const key = 'PurchaseOrder:' + item.PurchaseOrderNumber;
-          const _ex = detailCache.get(key);
-          if (_ex?.data?.record) _ex.data.record.Status = item.Status ?? _ex.data.record.Status;
-          else detailCache.set(key, { record: item });
-        });
-        setCachedSection('mypos', { items, fetchedAt: Date.now() });
-        renderBuiltinRows('mypos', items, 'PurchaseOrder', 'shopping_cart');
+        const hidden = new Set(cfg.hidden);
+        const items = (r?.Items ?? []).filter(i => !hidden.has(i.Status));
+        prePopulateDetailCache(cfg, items);
+        setCachedSection(cardId, { items, fetchedAt: Date.now() });
+        renderBuiltinRows(cardId, items, cfg.module, cfg.icon);
       })
       .catch(() => {
-        body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Failed to load POs</div>';
+        // Leave stale data visible on a background-refresh failure; only a cold cache shows the error.
+        if (!cached) body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">' + cfg.failed + '</div>';
       });
   }
+
+  function loadMyPOs(forceRefresh = false) { loadAgentSection('mypos', forceRefresh); }
 
   // Shared renderer for My Orders / My Quotes. `apiItems` are raw API response objects.
   // `numberField` is the record-number field name on the API item (e.g. 'OrderNumber').
@@ -4041,63 +4070,7 @@
     });
   }
 
-  function loadMyOrders(forceRefresh = false) {
-    const body = document.getElementById('rq-card-body-myorders');
-    if (!body) return;
-    const agent = localStorage.getItem(MY_ORDERS_AGENT_KEY);
-    if (!agent) {
-      body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Set your agent name above</div>';
-      return;
-    }
-
-    const cached = getCachedSection('myorders');
-    if (!forceRefresh && cached) {
-      cached.items.forEach(item => {
-        const key = 'Order:' + item.OrderNumber;
-        const _ex = detailCache.get(key);
-        if (_ex?.data?.record) _ex.data.record.Status = item.Status ?? _ex.data.record.Status;
-        else detailCache.set(key, { record: item });
-      });
-      renderBuiltinRows('myorders', cached.items, 'Order', 'assignment');
-      return;
-    }
-
-    body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Loading…</div>';
-
-    const controller = window.OrderController;
-    if (!controller?.apiurl) {
-      body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Order module not available</div>';
-      return;
-    }
-
-    const fetchOpts = {
-      headers: {
-        'authorization': 'Bearer ' + sessionStorage.apiToken,
-        'content-type': 'application/json',
-        'x-requested-with': 'XMLHttpRequest'
-      }
-    };
-
-    const filter = encodeURIComponent(JSON.stringify({ Field: 'Agent', Op: '=', Value: agent.toUpperCase() }));
-    fetch(RW_URL + controller.apiurl + '?pagesize=50&filter=' + filter, fetchOpts)
-      .then(r => r.json())
-      .then(r => {
-        const HIDDEN_STATUSES = new Set(['CANCELLED', 'CLOSED']);
-        const items = (r?.Items ?? []).filter(i => !HIDDEN_STATUSES.has(i.Status));
-        // Pre-populate detailCache so sort by date/amount works immediately
-        items.forEach(item => {
-          const key = 'Order:' + item.OrderNumber;
-          const _ex = detailCache.get(key);
-          if (_ex?.data?.record) _ex.data.record.Status = item.Status ?? _ex.data.record.Status;
-          else detailCache.set(key, { record: item });
-        });
-        setCachedSection('myorders', { items, fetchedAt: Date.now() });
-        renderBuiltinRows('myorders', items, 'Order', 'assignment');
-      })
-      .catch(() => {
-        body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Failed to load orders</div>';
-      });
-  }
+  function loadMyOrders(forceRefresh = false) { loadAgentSection('myorders', forceRefresh); }
 
   function buildMyQuotesCard() {
     const card = buildCard('My Quotes', 'request_quote', 'myquotes');
@@ -4185,61 +4158,7 @@
     return card;
   }
 
-  function loadMyQuotes(forceRefresh = false) {
-    const body = document.getElementById('rq-card-body-myquotes');
-    if (!body) return;
-    const agent = localStorage.getItem(MY_QUOTES_AGENT_KEY);
-    if (!agent) {
-      body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Set your agent name above</div>';
-      return;
-    }
-
-    const cached = getCachedSection('myquotes');
-    if (!forceRefresh && cached && (Date.now() - cached.fetchedAt) < AGENT_CACHE_TTL) {
-      if (body.children.length > 0) return;
-      cached.items.forEach(item => {
-        const key = 'Quote:' + item.QuoteNumber;
-        const _ex = detailCache.get(key);
-        if (_ex?.data?.record) _ex.data.record.Status = item.Status ?? _ex.data.record.Status;
-        else detailCache.set(key, { record: item });
-      });
-      renderBuiltinRows('myquotes', cached.items, 'Quote', 'request_quote');
-      return;
-    }
-
-    body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Loading…</div>';
-    const controller = window.QuoteController;
-    if (!controller?.apiurl) {
-      body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Quote module not available</div>';
-      return;
-    }
-    const fetchOpts = {
-      headers: {
-        'authorization': 'Bearer ' + sessionStorage.apiToken,
-        'content-type': 'application/json',
-        'x-requested-with': 'XMLHttpRequest'
-      }
-    };
-    const filter = encodeURIComponent(JSON.stringify({ Field: 'Agent', Op: '=', Value: agent.toUpperCase() }));
-    fetch(RW_URL + controller.apiurl + '?pagesize=50&filter=' + filter, fetchOpts)
-      .then(r => r.json())
-      .then(r => {
-        const HIDDEN_STATUSES = new Set(['CANCELLED', 'CLOSED', 'ORDERED']);
-        const items = (r?.Items ?? []).filter(i => !HIDDEN_STATUSES.has(i.Status));
-        // Pre-populate detailCache so sort by date/amount works immediately
-        items.forEach(item => {
-          const key = 'Quote:' + item.QuoteNumber;
-          const _ex = detailCache.get(key);
-          if (_ex?.data?.record) _ex.data.record.Status = item.Status ?? _ex.data.record.Status;
-          else detailCache.set(key, { record: item });
-        });
-        setCachedSection('myquotes', { items, fetchedAt: Date.now() });
-        renderBuiltinRows('myquotes', items, 'Quote', 'request_quote');
-      })
-      .catch(() => {
-        body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Failed to load quotes</div>';
-      });
-  }
+  function loadMyQuotes(forceRefresh = false) { loadAgentSection('myquotes', forceRefresh); }
 
   // ── Preps card (Google Sheets daily prep schedule) ─────────────────
 
@@ -4420,12 +4339,17 @@
     }
 
     const cachedPreps = getCachedPreps();
-    if (!forceRefresh && cachedPreps) {
+    const prepsFresh  = cachedPreps && (Date.now() - cachedPreps.fetchedAt) < PREPS_CACHE_TTL;
+
+    // Render the cached schedule immediately, but skip the re-render if rows are
+    // already on screen to avoid needless flicker when reopening the panel.
+    if (cachedPreps && !body.querySelector('.rq-card-row')) {
       renderPreps(cachedPreps.groups, cachedPreps.rwData);
-      return;
     }
 
-    body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Loading…</div>';
+    // Refetch only when forced or when the cache is stale/cold.
+    if (!forceRefresh && prepsFresh) return;
+    if (!cachedPreps) body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Loading…</div>';
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -4438,18 +4362,23 @@
       return { date: d, str: fmtSheetDate(d) };
     });
 
-    const results = await Promise.all(
-      dates.map(({ date, str }) => fetchPrepsForDate(sheetId, str).then(rows => ({ date, str, rows })))
-    );
+    try {
+      const results = await Promise.all(
+        dates.map(({ date, str }) => fetchPrepsForDate(sheetId, str).then(rows => ({ date, str, rows })))
+      );
 
-    const groups = results.filter(g => g.rows.length > 0);
+      const groups = results.filter(g => g.rows.length > 0);
 
-    // Batch-fetch RW order data for all unique order numbers
-    const allOrderNos = [...new Set(groups.flatMap(g => g.rows.map(r => (r['Order No.'] || '').trim()).filter(Boolean)))];
-    const rwData = await fetchOrdersByNumbers(allOrderNos);
+      // Batch-fetch RW order data for all unique order numbers
+      const allOrderNos = [...new Set(groups.flatMap(g => g.rows.map(r => (r['Order No.'] || '').trim()).filter(Boolean)))];
+      const rwData = await fetchOrdersByNumbers(allOrderNos);
 
-    setCachedPreps({ groups, rwData, fetchedAt: Date.now() });
-    renderPreps(groups, rwData);
+      setCachedPreps({ groups, rwData, fetchedAt: Date.now() });
+      renderPreps(groups, rwData);
+    } catch {
+      // Leave stale data visible on a background-refresh failure; only a cold cache shows the error.
+      if (!cachedPreps) body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Failed to load preps</div>';
+    }
   }
 
   // Build a single draggable prep row, preferring RW API data over sheet data.
