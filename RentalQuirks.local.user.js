@@ -23,8 +23,6 @@
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/lib/ZebraBrowserPrint/BrowserPrint-Zebra-1.0.216.min.js
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_barcode.js
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_dashboard.js
-// @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_order_monitor.js
-// @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_order_history.js
 // ==/UserScript==
 
 // Local dev version. To use:

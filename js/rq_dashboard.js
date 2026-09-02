@@ -185,7 +185,6 @@
   const PREPS_SHEET_KEY   = 'rq-dashboard-preps-sheet-url';
   const PREPS_VIEW_KEY    = 'rq-dashboard-preps-view'; // 'list' | 'floor'
   const PREPS_CACHE_TTL   = 8 * 60 * 1000; // 8 minutes
-  const MONITOR_WEBHOOK_KEY = 'rq-order-monitor-webhook';
   let prepsCache = null; // { groups: [{date, str, rows}], fetchedAt }
 
   // ── Persistent section cache (survives page reloads within same session) ──
@@ -4123,31 +4122,6 @@
     card._cfgBar.insertBefore(frag, card._cfgBar.firstChild);
     // cfgBar: [inputWrap][applyBtn][removeBtn×]
 
-    // Webhook URL row (second line in wrapped flex)
-    const webhookInput = document.createElement('input');
-    webhookInput.type = 'text';
-    webhookInput.placeholder = 'Monitor webhook URL (Apps Script)…';
-    webhookInput.value = localStorage.getItem(MONITOR_WEBHOOK_KEY) || '';
-    webhookInput.style.cssText = CFG_INPUT_CSS;
-    webhookInput.addEventListener('click', e => e.stopPropagation());
-    webhookInput.addEventListener('dragstart', e => e.stopPropagation());
-
-    const webhookApplyBtn = el('button', CFG_APPLY_BTN_CSS, 'Apply');
-    webhookApplyBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const url = webhookInput.value.trim();
-      if (url) localStorage.setItem(MONITOR_WEBHOOK_KEY, url);
-      else localStorage.removeItem(MONITOR_WEBHOOK_KEY);
-    });
-    webhookInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') webhookApplyBtn.click(); e.stopPropagation(); });
-
-    card._cfgBar.style.flexWrap = 'wrap';
-    const rowBreak = el('div', 'flex-basis:100%;height:0;');
-    const webhookWrap = el('div', '');
-    webhookWrap.className = 'rq-cfg-input-wrap';
-    webhookWrap.appendChild(webhookInput);
-    card._cfgBar.append(rowBreak, webhookWrap, webhookApplyBtn);
-
     // viewBtn in the "sort" slot, refresh before collapse
     card._cfgToggleBtn.insertAdjacentElement('beforebegin', viewBtn);
     card._collapseBtn.insertAdjacentElement('beforebegin', refreshBtn);
@@ -5558,7 +5532,5 @@
 
   RQ.runOnAppLoad ||= [];
   RQ.runOnAppLoad.push(initDashboard);
-
-  RQ.fetchOrderDetail = (orderNumber) => fetchRecordDetail('Order', orderNumber);
 
 })(window.RentalQuirks);
