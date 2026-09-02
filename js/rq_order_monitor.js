@@ -10,8 +10,11 @@
   const LAST_POLL_KEY    = 'rq-order-monitor-last-poll';
   const WEBHOOK_KEY      = 'rq-order-monitor-webhook';
   const PREPS_SHEET_KEY  = 'rq-dashboard-preps-sheet-url';
+  const SEEN_KEY         = 'rq-order-monitor-seen'; // { orderNo: lastSeenMs }, drives retention
   const POLL_INTERVAL_MS = 2.5 * 60 * 1000; // 2.5 minutes
   const REQUEST_SPACING_MS = 500; // pause between orders so background polling doesn't starve the connection pool the user's page navigation needs
+  const RETENTION_MS     = 30 * 24 * 60 * 60 * 1000; // forget an order 30 days after it last appeared in the prep window
+  const PRUNE_PREFIXES   = [SNAPSHOT_PREFIX]; // per-order keys pruneOrderState() is allowed to delete
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -117,6 +120,50 @@
     } catch (e) {
       console.warn('[RQ Monitor] Failed to save snapshot for', orderNumber, e);
     }
+  }
+
+  // ── Retention ─────────────────────────────────────────────────────
+  // Every order ever prepped used to leave a snapshot behind for good. Snapshots
+  // carry a full item list, so localStorage eventually hits its ~5MB quota — and
+  // because saveSnapshot() only warns on failure, change detection would degrade
+  // into silence rather than fail loudly.
+  //
+  // Retention is keyed on when an order was last seen in the prep window, not on
+  // whether it appears in the current cycle: fetchPrepsOrders() swallows per-date
+  // errors and returns [], so a partially failed sheet read must not be allowed to
+  // discard state for orders that are still live.
+
+  function loadSeen() {
+    try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}'); }
+    catch { return {}; }
+  }
+
+  // Marks `orders` as seen now, then deletes per-order keys for every order whose
+  // last sighting is older than RETENTION_MS (and any key predating this registry).
+  // Dropping state is cheap: a returning order simply re-baselines on its next poll.
+  function pruneOrderState(orders) {
+    const now  = Date.now();
+    const seen = loadSeen();
+    orders.forEach(o => { seen[o] = now; });
+
+    const live = new Set();
+    for (const [orderNo, lastSeen] of Object.entries(seen)) {
+      if (now - lastSeen < RETENTION_MS) live.add(orderNo);
+      else delete seen[orderNo]; // keeps the registry itself bounded
+    }
+
+    let dropped = 0;
+    for (const key of Object.keys(localStorage)) { // snapshots the key list, so removeItem below is safe
+      const prefix = PRUNE_PREFIXES.find(p => key.startsWith(p));
+      if (!prefix || live.has(key.slice(prefix.length))) continue;
+      localStorage.removeItem(key);
+      dropped++;
+    }
+
+    try { localStorage.setItem(SEEN_KEY, JSON.stringify(seen)); }
+    catch (e) { console.warn('[RQ Monitor] Failed to save seen-order registry', e); }
+
+    if (dropped) console.log(`[RQ Monitor] Pruned ${dropped} stale order snapshot(s)`);
   }
 
   // ── Diff ──────────────────────────────────────────────────────────
@@ -246,6 +293,9 @@
     await runIfLeader('rq-order-monitor-poll', async () => {
       const jobs = await fetchPrepsOrders();
       if (!jobs.length) return;
+
+      // Reclaim space before writing this cycle's snapshots, not after.
+      pruneOrderState(jobs.map(j => j.order));
 
       console.log(`[RQ Monitor] Polling ${jobs.length} order(s)…`);
 
