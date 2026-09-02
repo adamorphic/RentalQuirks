@@ -11,7 +11,6 @@
 (function(RQ) {
   'use strict';
 
-  const PREPS_SHEET_KEY  = 'rq-dashboard-preps-sheet-url';
   const WEBHOOK_KEY      = 'rq-order-history-webhook';
   const HWM_PREFIX       = 'rq-history-hwm-';    // high-water mark (ChangeDateTime) per order
   const ID_CACHE_PREFIX  = 'rq-history-id-';     // order number → numeric OrderId cache
@@ -21,78 +20,8 @@
   const DAYS_FORWARD = 13;
   const REQUEST_SPACING_MS = 500; // pause between orders so background polling doesn't starve the user's page loads
   const RETENTION_MS     = 30 * 24 * 60 * 60 * 1000; // forget an order 30 days after it last appeared in the prep window
-  const PRUNE_PREFIXES   = [HWM_PREFIX, ID_CACHE_PREFIX]; // per-order keys pruneOrderState() is allowed to delete
 
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-  // Only one browser tab should poll at a time. Web Locks auto-release when the tab
-  // closes, so the lock naturally migrates to another open tab. ifAvailable:true means
-  // a tab that doesn't get the lock skips this cycle instead of queuing behind it.
-  async function runIfLeader(lockName, work) {
-    if (!navigator.locks?.request) { await work(); return; } // old browser: no leader election
-    await navigator.locks.request(lockName, { ifAvailable: true }, async lock => {
-      if (!lock) { console.log('[RQ History] Another tab is polling; skipping this cycle'); return; }
-      await work();
-    });
-  }
-
-  // ── Sheet reading ──────────────────────────────────────────────────
-
-  function getSheetId() {
-    const url = localStorage.getItem(PREPS_SHEET_KEY) || '';
-    const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
-    return m ? m[1] : null;
-  }
-
-  function fmtDate(d) {
-    return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
-  }
-
-  // Returns deduplicated job objects: { order, tech, production, company, prepDate }
-  async function fetchPrepsJobs() {
-    const sheetId = getSheetId();
-    if (!sheetId) return [];
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const dates = Array.from({ length: DAYS_BACK + DAYS_FORWARD + 1 }, (_, i) => {
-      const d = new Date(today);
-      d.setDate(today.getDate() + (i - DAYS_BACK));
-      return fmtDate(d);
-    });
-
-    const results = await Promise.all(dates.map(dateStr => {
-      const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(dateStr)}&range=B2:L500&headers=1`;
-      return fetch(url)
-        .then(r => r.text())
-        .then(text => {
-          const m = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]*)\);?\s*$/);
-          if (!m) return [];
-          const json = JSON.parse(m[1]);
-          if (json.status !== 'ok' || !json.table?.rows?.length) return [];
-          const cols = json.table.cols.map(c => c.label);
-          return json.table.rows
-            .map(row => {
-              const obj = {};
-              row.c.forEach((cell, i) => { obj[cols[i]] = cell?.f ?? (typeof cell?.v === 'string' ? cell.v : null); });
-              return obj;
-            })
-            .filter(r => r['Order No.'])
-            .map(r => ({
-              order:      (r['Order No.']          || '').trim(),
-              tech:       (r['Prep Tech']           || '').trim(),
-              production: (r['Job Name']            || '').trim(),
-              company:    (r['Production Company']  || '').trim(),
-              prepDate:   dateStr,
-            }));
-        })
-        .catch(() => []);
-    }));
-
-    // Deduplicate by order number — earliest prepDate wins
-    const seen = new Set();
-    return results.flat().filter(j => j.order && !seen.has(j.order) && seen.add(j.order));
-  }
+  const fetchPrepsJobs = () => RQ.sheets.fetchPrepJobs(DAYS_BACK, DAYS_FORWARD);
 
   // ── Order ID resolution ────────────────────────────────────────────
 
@@ -196,49 +125,10 @@
     if (datetime) localStorage.setItem(HWM_PREFIX + orderNo, datetime);
   }
 
-  // ── Retention ──────────────────────────────────────────────────────
-  // Every order ever polled used to leave a high-water mark and an id-cache entry
-  // behind for good, so localStorage grew without bound and would eventually hit
-  // its ~5MB quota, breaking writes across all of RentalQuirks.
-  //
-  // Retention is keyed on when an order was last seen in the prep window, not on
-  // whether it appears in the current cycle: fetchPrepsJobs() swallows per-date
-  // errors and returns [], so a partially failed sheet read must not be allowed to
-  // discard state for orders that are still live.
-
-  function loadSeen() {
-    try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}'); }
-    catch { return {}; }
-  }
-
-  // Marks `orders` as seen now, then deletes per-order keys for every order whose
-  // last sighting is older than RETENTION_MS (and any key predating this registry).
-  // Dropping a high-water mark is cheap: the order re-baselines to now on its next
+  // Drops the high-water mark and cached id for orders that have fallen out of the
+  // prep window. Losing a mark is cheap: the order re-baselines to now on its next
   // poll, and it was outside the window — so unwatched — for the whole gap anyway.
-  function pruneOrderState(orders) {
-    const now  = Date.now();
-    const seen = loadSeen();
-    orders.forEach(o => { seen[o] = now; });
-
-    const live = new Set();
-    for (const [orderNo, lastSeen] of Object.entries(seen)) {
-      if (now - lastSeen < RETENTION_MS) live.add(orderNo);
-      else delete seen[orderNo]; // keeps the registry itself bounded
-    }
-
-    let dropped = 0;
-    for (const key of Object.keys(localStorage)) { // snapshots the key list, so removeItem below is safe
-      const prefix = PRUNE_PREFIXES.find(p => key.startsWith(p));
-      if (!prefix || live.has(key.slice(prefix.length))) continue;
-      localStorage.removeItem(key);
-      dropped++;
-    }
-
-    try { localStorage.setItem(SEEN_KEY, JSON.stringify(seen)); }
-    catch (e) { console.warn('[RQ History] Failed to save seen-order registry', e); }
-
-    if (dropped) console.log(`[RQ History] Pruned ${dropped} stale order key(s)`);
-  }
+  const pruneOrderState = makeStatePruner(SEEN_KEY, [HWM_PREFIX, ID_CACHE_PREFIX], RETENTION_MS, '[RQ History]');
 
   // ── Webhook ────────────────────────────────────────────────────────
   // Apps Script /exec redirects POST→GET, losing the body.
@@ -324,7 +214,7 @@
       }
 
       console.log('[RQ History] Poll complete');
-    });
+    }, '[RQ History]');
   }
 
   // ── Startup ────────────────────────────────────────────────────────

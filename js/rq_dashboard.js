@@ -4179,38 +4179,6 @@
     });
   }
 
-  function getSheetIdFromUrl(url) {
-    const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
-    return m ? m[1] : null;
-  }
-
-  function fmtSheetDate(date) {
-    // Matches sheet tab name format: "2026-4-10" (no leading zeros)
-    return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
-  }
-
-  function fetchPrepsForDate(sheetId, dateStr) {
-    // Use gviz API with range starting at row 2 (row 1 is the date header, row 2 is column names)
-    const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(dateStr)}&range=B2:L500&headers=1`;
-    return fetch(url)
-      .then(r => r.text())
-      .then(text => {
-        const match = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]*)\);?\s*$/);
-        if (!match) return [];
-        const json = JSON.parse(match[1]);
-        if (json.status !== 'ok' || !json.table?.rows?.length) return [];
-        const cols = json.table.cols.map(c => c.label);
-        return json.table.rows
-          .map(row => {
-            const obj = {};
-            row.c.forEach((cell, i) => { obj[cols[i]] = cell?.f ?? (typeof cell?.v === 'string' ? cell.v : null); });
-            return obj;
-          })
-          .filter(r => r['Order No.']); // skip rows without an LA number
-      })
-      .catch(() => []);
-  }
-
   async function loadPreps(forceRefresh = false) {
     const body = document.getElementById('rq-card-body-preps');
     if (!body) return;
@@ -4220,7 +4188,7 @@
       body.innerHTML = placeholderHTML('Paste your Google Sheet URL above');
       return;
     }
-    const sheetId = getSheetIdFromUrl(sheetUrl);
+    const sheetId = RQ.sheets.getSheetIdFromUrl(sheetUrl);
     if (!sheetId) {
       body.innerHTML = placeholderHTML('Invalid sheet URL');
       return;
@@ -4239,23 +4207,11 @@
     if (!forceRefresh && prepsFresh) return;
     if (!cachedPreps) body.innerHTML = placeholderHTML('Loading…');
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
     // Fetch 7 days back + today + next 13 days in parallel
-    const DAYS_BACK = 7;
-    const dates = Array.from({ length: DAYS_BACK + 14 }, (_, i) => {
-      const d = new Date(today);
-      d.setDate(d.getDate() + (i - DAYS_BACK));
-      return { date: d, str: fmtSheetDate(d) };
-    });
+    const dates = RQ.sheets.windowDates(7, 13);
 
     try {
-      const results = await Promise.all(
-        dates.map(({ date, str }) => fetchPrepsForDate(sheetId, str).then(rows => ({ date, str, rows })))
-      );
-
-      const groups = results.filter(g => g.rows.length > 0);
+      const groups = await RQ.sheets.fetchPrepGroups(sheetId, dates);
 
       // Batch-fetch RW order data for all unique order numbers
       const allOrderNos = [...new Set(groups.flatMap(g => g.rows.map(r => (r['Order No.'] || '').trim()).filter(Boolean)))];
@@ -4483,7 +4439,7 @@
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const todayStr = fmtSheetDate(today);
+    const todayStr = RQ.sheets.fmtDate(today);
 
     // Floor plan view: grid with prev/next day navigation
     const viewMode = localStorage.getItem(PREPS_VIEW_KEY) || 'list';

@@ -12,6 +12,7 @@
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/script_execution_mgr.js
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_p_login.js
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_common.js
+// @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_sheets.js
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_all_pages.js
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_server_api.js
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_quiknav.js

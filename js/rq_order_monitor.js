@@ -9,88 +9,16 @@
   const SNAPSHOT_PREFIX  = 'rq-order-snapshot-';
   const LAST_POLL_KEY    = 'rq-order-monitor-last-poll';
   const WEBHOOK_KEY      = 'rq-order-monitor-webhook';
-  const PREPS_SHEET_KEY  = 'rq-dashboard-preps-sheet-url';
   const SEEN_KEY         = 'rq-order-monitor-seen'; // { orderNo: lastSeenMs }, drives retention
   const POLL_INTERVAL_MS = 2.5 * 60 * 1000; // 2.5 minutes
   const REQUEST_SPACING_MS = 500; // pause between orders so background polling doesn't starve the connection pool the user's page navigation needs
   const RETENTION_MS     = 30 * 24 * 60 * 60 * 1000; // forget an order 30 days after it last appeared in the prep window
-  const PRUNE_PREFIXES   = [SNAPSHOT_PREFIX]; // per-order keys pruneOrderState() is allowed to delete
-
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const DAYS_BACK        = 0;  // the monitor diffs upcoming work only, so it doesn't look backwards
+  const DAYS_FORWARD     = 13;
 
   let warnedNoWebhook = false; // only warn once per session that the webhook URL is missing
 
-  // Only one browser tab should poll at a time. Web Locks auto-release when the tab
-  // closes, so the lock naturally migrates to another open tab. ifAvailable:true means
-  // a tab that doesn't get the lock skips this cycle instead of queuing behind it.
-  async function runIfLeader(lockName, work) {
-    if (!navigator.locks?.request) { await work(); return; } // old browser: no leader election
-    await navigator.locks.request(lockName, { ifAvailable: true }, async lock => {
-      if (!lock) { console.log('[RQ Monitor] Another tab is polling; skipping this cycle'); return; }
-      await work();
-    });
-  }
-
-  // ── Sheet reading ─────────────────────────────────────────────────
-
-  function getSheetId() {
-    const url = localStorage.getItem(PREPS_SHEET_KEY) || '';
-    const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
-    return m ? m[1] : null;
-  }
-
-  function fmtDate(d) {
-    return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
-  }
-
-  async function fetchPrepsOrders() {
-    const sheetId = getSheetId();
-    if (!sheetId) return [];
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const dates = Array.from({ length: 14 }, (_, i) => {
-      const d = new Date(today);
-      d.setDate(today.getDate() + i);
-      return fmtDate(d);
-    });
-
-    const results = await Promise.all(dates.map(dateStr => {
-      const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(dateStr)}&range=B2:L500&headers=1`;
-      return fetch(url)
-        .then(r => r.text())
-        .then(text => {
-          const m = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]*)\);?\s*$/);
-          if (!m) return [];
-          const json = JSON.parse(m[1]);
-          if (json.status !== 'ok' || !json.table?.rows?.length) return [];
-          const cols = json.table.cols.map(c => c.label);
-          return json.table.rows
-            .map(row => {
-              const obj = {};
-              row.c.forEach((cell, i) => { obj[cols[i]] = cell?.f ?? (typeof cell?.v === 'string' ? cell.v : null); });
-              return obj;
-            })
-            .filter(r => r['Order No.'])
-            .map(r => ({
-              order:      (r['Order No.']         || '').trim(),
-              tech:       (r['Prep Tech']          || '').trim(),
-              production: (r['Job Name']           || '').trim(),
-              company:    (r['Production Company'] || '').trim(),
-              prepDate:   dateStr,
-            }));
-        })
-        .catch(() => []);
-    }));
-
-    // Flatten and deduplicate by order number (earliest date wins)
-    const seen = new Set();
-    return results.flat().filter(j => {
-      if (!j.order || seen.has(j.order)) return false;
-      seen.add(j.order);
-      return true;
-    });
-  }
+  const fetchPrepsOrders = () => RQ.sheets.fetchPrepJobs(DAYS_BACK, DAYS_FORWARD);
 
   // ── Snapshot storage ──────────────────────────────────────────────
 
@@ -122,49 +50,9 @@
     }
   }
 
-  // ── Retention ─────────────────────────────────────────────────────
-  // Every order ever prepped used to leave a snapshot behind for good. Snapshots
-  // carry a full item list, so localStorage eventually hits its ~5MB quota — and
-  // because saveSnapshot() only warns on failure, change detection would degrade
-  // into silence rather than fail loudly.
-  //
-  // Retention is keyed on when an order was last seen in the prep window, not on
-  // whether it appears in the current cycle: fetchPrepsOrders() swallows per-date
-  // errors and returns [], so a partially failed sheet read must not be allowed to
-  // discard state for orders that are still live.
-
-  function loadSeen() {
-    try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}'); }
-    catch { return {}; }
-  }
-
-  // Marks `orders` as seen now, then deletes per-order keys for every order whose
-  // last sighting is older than RETENTION_MS (and any key predating this registry).
-  // Dropping state is cheap: a returning order simply re-baselines on its next poll.
-  function pruneOrderState(orders) {
-    const now  = Date.now();
-    const seen = loadSeen();
-    orders.forEach(o => { seen[o] = now; });
-
-    const live = new Set();
-    for (const [orderNo, lastSeen] of Object.entries(seen)) {
-      if (now - lastSeen < RETENTION_MS) live.add(orderNo);
-      else delete seen[orderNo]; // keeps the registry itself bounded
-    }
-
-    let dropped = 0;
-    for (const key of Object.keys(localStorage)) { // snapshots the key list, so removeItem below is safe
-      const prefix = PRUNE_PREFIXES.find(p => key.startsWith(p));
-      if (!prefix || live.has(key.slice(prefix.length))) continue;
-      localStorage.removeItem(key);
-      dropped++;
-    }
-
-    try { localStorage.setItem(SEEN_KEY, JSON.stringify(seen)); }
-    catch (e) { console.warn('[RQ Monitor] Failed to save seen-order registry', e); }
-
-    if (dropped) console.log(`[RQ Monitor] Pruned ${dropped} stale order snapshot(s)`);
-  }
+  // Drops snapshots for orders that have fallen out of the prep window. Losing one
+  // is cheap: a returning order simply re-baselines on its next poll.
+  const pruneOrderState = makeStatePruner(SEEN_KEY, [SNAPSHOT_PREFIX], RETENTION_MS, '[RQ Monitor]');
 
   // ── Diff ──────────────────────────────────────────────────────────
 
@@ -330,7 +218,7 @@
 
       localStorage.setItem(LAST_POLL_KEY, String(Date.now()));
       console.log('[RQ Monitor] Poll complete');
-    });
+    }, '[RQ Monitor]');
   }
 
   // ── Startup ───────────────────────────────────────────────────────
