@@ -15,6 +15,8 @@
 (function (RQ) {
   'use strict';
 
+  const CACHE_TTL        = 2 * 60 * 1000; // how long a fetched tab stays reusable
+  const rowCache         = new Map();     // `${sheetId}|${dateStr}` -> { promise, fetchedAt }
   const GVIZ_RESPONSE_RE = /google\.visualization\.Query\.setResponse\(([\s\S]*)\);?\s*$/;
 
   RQ.sheets = {};
@@ -46,10 +48,19 @@
   /**
    * One day's rows as objects keyed by column name. Rows with no order number are
    * dropped. Resolves to [] on any failure rather than rejecting.
+   *
+   * Results are cached for CACHE_TTL, and the cache holds the *promise* rather than
+   * the rows, so overlapping requests for the same tab share one fetch instead of
+   * racing. A window spans ~21 tabs and the card can be reopened or refreshed
+   * repeatedly, so this collapses a lot of redundant traffic.
    */
   RQ.sheets.fetchPrepRows = function (sheetId, dateStr) {
+    const key = sheetId + '|' + dateStr;
+    const hit = rowCache.get(key);
+    if (hit && (Date.now() - hit.fetchedAt) < CACHE_TTL) return hit.promise;
+
     const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(dateStr)}&range=B2:L500&headers=1`;
-    return fetch(url)
+    const promise = fetch(url)
       .then(r => r.text())
       .then(text => {
         const m = text.match(GVIZ_RESPONSE_RE);
@@ -66,6 +77,9 @@
           .filter(r => r['Order No.']);
       })
       .catch(() => []);
+
+    rowCache.set(key, { promise, fetchedAt: Date.now() });
+    return promise;
   };
 
   /**

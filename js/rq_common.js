@@ -155,3 +155,28 @@ let WindowDragger = function (container) {
     drag_item = null;
   }
 };
+
+/**
+ * Shared watcher for RentalWorks record forms finishing their load (the
+ * 'form_load_complete' class being added to a .fwform element). Detecting this
+ * requires a subtree-wide class-attribute observer on document.body, which has a
+ * per-mutation cost across the whole app - so all features share this single
+ * lazily-created observer rather than each creating their own.
+ * @param {Function} callback receives the form Element each time a form load completes.
+ */
+RentalQuirks.onFormLoadComplete = (function () {
+  const callbacks = [];
+  let started = false;
+  return function (callback) {
+    callbacks.push(callback);
+    if (started) return;
+    started = true;
+    on_class_added('form_load_complete', document.body, (form) => {
+      if (!form.matches('.fwform[data-controller]')) return;
+      callbacks.forEach(cb => {
+        try { cb(form); }
+        catch (e) { console.error('[RQ] onFormLoadComplete callback failed', e); }
+      });
+    });
+  };
+})();

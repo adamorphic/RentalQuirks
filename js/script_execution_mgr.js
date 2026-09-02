@@ -136,7 +136,7 @@ function on_class_added(class_name, root = document.documentElement, do_to_elem)
   new MutationObserver((mutations, observer) => {
     // Round up all the newly added nodes which have just had class_name added to their classList
     mutations.filter((mut) => mut.target.classList.contains(class_name))
-             .filter((mut) => !mut.oldValue.split(' ').includes(class_name))
+             .filter((mut) => !(mut.oldValue ?? '').split(' ').includes(class_name))
              .forEach(m => do_to_elem(m.target));
   }).observe(root, observerOptions);
 }

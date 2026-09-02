@@ -5296,8 +5296,7 @@
 
   // ── Module change detection (e.g. Quote → Order) ──────────────────
   function watchForModuleChanges() {
-    on_class_added('form_load_complete', document.body, (form) => {
-      if (!form.matches('.fwform[data-controller]')) return;
+    RQ.onFormLoadComplete((form) => {
       const module = form.dataset.controller.replace(/Controller$/, '');
       const fieldNames = RQ.api.module_identifier_names?.(module);
       if (!fieldNames) return;

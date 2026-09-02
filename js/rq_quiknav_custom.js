@@ -904,8 +904,7 @@ del.addEventListener('mouseleave', () => { del.style.color = '#f88'; del.style.b
   function initBookmarks() {
     // RW adds the form node first, then adds form_load_complete as a class once loaded —
     // so watching for class addition is more reliable than watching for node insertion.
-    on_class_added('form_load_complete', document.body, (form) => {
-      if (!form.matches('.fwform[data-controller]')) return;
+    RQ.onFormLoadComplete((form) => {
       if (form.dataset.rqSeen) return;
       form.dataset.rqSeen = '1';
       createStarButton(form);
@@ -1285,8 +1284,7 @@ del.addEventListener('mouseleave', () => { del.style.color = '#f88'; del.style.b
     // Track records when form_load_complete class is added to a form element.
     // RW adds the form node first, then adds form_load_complete as a class once loaded —
     // so watching for class addition is more reliable than watching for node insertion.
-    on_class_added('form_load_complete', document.body, (form) => {
-      if (!form.matches('.fwform[data-controller]')) return;
+    RQ.onFormLoadComplete((form) => {
       if (form.dataset.rqRecentSeen) return;
       form.dataset.rqRecentSeen = '1';
       trackRecord(form);
