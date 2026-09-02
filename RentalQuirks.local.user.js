@@ -19,9 +19,6 @@
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_quiknav_custom.js
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_p_rentalinventory.js
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_reports.js
-// @require      file:///C:/Users/aagostino/RentalQuirks/js/lib/ZebraBrowserPrint/BrowserPrint-3.0.216.min.js
-// @require      file:///C:/Users/aagostino/RentalQuirks/js/lib/ZebraBrowserPrint/BrowserPrint-Zebra-1.0.216.min.js
-// @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_barcode.js
 // @require      file:///C:/Users/aagostino/RentalQuirks/js/rq_dashboard.js
 // ==/UserScript==
 
