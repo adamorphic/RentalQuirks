@@ -3997,9 +3997,24 @@
     });
   }
 
+  // rq_sheets.js is a separate @require. The installed Tampermonkey script is a
+  // copy of RentalQuirks.local.user.js kept in Tampermonkey's own storage, so
+  // editing the file in this repo does NOT update what actually loads — a module
+  // added here has to be added there by hand. Without this check the omission
+  // surfaces as "Cannot read properties of undefined (reading 'getSheetIdFromUrl')"
+  // from deep inside the Preps card, which says nothing about the real cause.
+  function sheetsReady(body) {
+    if (RQ.sheets) return true;
+    console.error("[RQ] rq_sheets.js is not loaded. Add its @require line to your " +
+                  "Tampermonkey script, before rq_dashboard.js. The Preps card is disabled.");
+    if (body) body.innerHTML = placeholderHTML('rq_sheets.js not loaded — see console');
+    return false;
+  }
+
   async function loadPreps(forceRefresh = false) {
     const body = document.getElementById('rq-card-body-preps');
     if (!body) return;
+    if (!sheetsReady(body)) return;
 
     const sheetUrl = localStorage.getItem(PREPS_SHEET_KEY);
     if (!sheetUrl) {
@@ -4246,6 +4261,7 @@
   }
 
   function renderPreps(groups, rwData) {
+    if (!sheetsReady(document.getElementById('rq-card-body-preps'))) return;
     const body = document.getElementById('rq-card-body-preps');
     if (!body) return;
     body.innerHTML = '';
