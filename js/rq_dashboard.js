@@ -25,6 +25,45 @@
     return e;
   }
 
+  // Shared cfg-bar styling for text inputs and their Apply buttons.
+  const CFG_INPUT_CSS = `
+    width: 100%; min-width: 0; background: #141414; color: #ccc; border: 1px solid #333;
+    border-radius: 3px; padding: 5px 9px; font-size: 13px; font-family: inherit; outline: none;`;
+  const CFG_APPLY_BTN_CSS = `
+    background: #1a3a1a; border: 1px solid #2a5a2a; color: #8ac; border-radius: 3px;
+    padding: 5px 10px; font-size: 13px; cursor: pointer; flex-shrink: 0; white-space: nowrap;`;
+
+  // Build a Material-icons icon button with the card header's standard hover behaviour.
+  // opts: { color = '#444', hoverColor = '#8ac', title, onClick, css }. onClick is wrapped to
+  // stopPropagation (these live inside draggable cards). Returns the <i> element.
+  function makeIconButton(icon, opts = {}) {
+    const { color = '#444', hoverColor = '#8ac', title, onClick, css = '' } = opts;
+    const btn = el('i', `font-size: 15px; color: ${color}; cursor: pointer; flex-shrink: 0; transition: color 0.15s; ${css}`);
+    btn.className = 'material-icons';
+    btn.textContent = icon;
+    if (title) btn.title = title;
+    btn.addEventListener('mouseenter', () => btn.style.color = hoverColor);
+    btn.addEventListener('mouseleave', () => btn.style.color = color);
+    if (onClick) btn.addEventListener('click', (e) => { e.stopPropagation(); onClick(e); });
+    return btn;
+  }
+
+  // Standard italic placeholder/empty markup used inside card bodies.
+  const placeholderHTML = (text) =>
+    `<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">${text}</div>`;
+
+  // Dismiss `element` on the next outside mousedown, then detach the listener.
+  // Deferred a tick so the opening click doesn't immediately close it.
+  function closeOnOutsideClick(element, onClose) {
+    const handler = (e) => {
+      if (!element.contains(e.target)) {
+        document.removeEventListener('mousedown', handler, true);
+        (onClose || (() => element.remove()))();
+      }
+    };
+    setTimeout(() => document.addEventListener('mousedown', handler, true), 0);
+  }
+
   function loadCustomSections() {
     try { return JSON.parse(localStorage.getItem(CUSTOM_SECTIONS_KEY) || '[]'); }
     catch { return []; }
@@ -750,8 +789,7 @@
       if (!e.relatedTarget?.closest?.('#rq-dashboard, #rq-snooze-menu')) panelEl?._scheduleClose?.();
     });
 
-    const close = (e) => { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('mousedown', close, true); } };
-    setTimeout(() => document.addEventListener('mousedown', close, true), 0);
+    closeOnOutsideClick(menu);
   }
 
   // ── Personal status badge ──────────────────────────────────────────────────
@@ -820,8 +858,7 @@
     const r = anchorEl.getBoundingClientRect();
     menu.style.left = Math.min(r.left, window.innerWidth - 170) + 'px';
     menu.style.top  = Math.min(r.bottom + 4, window.innerHeight - 150) + 'px';
-    const close = (e) => { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('mousedown', close, true); } };
-    setTimeout(() => document.addEventListener('mousedown', close, true), 0);
+    closeOnOutsideClick(menu);
   }
 
   function showStatusContextMenu(e, badge, module, rn, renderFn) {
@@ -3434,7 +3471,7 @@
       const cardBody = document.getElementById('rq-card-body-custom-' + section.id);
 
       if (opt?.async) {
-        if (cardBody) cardBody.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Sorting…</div>';
+        if (cardBody) cardBody.innerHTML = placeholderHTML('Sorting…');
         await Promise.all(s.items.map(item => fetchRecordDetail(item.module, item.recordNumber).catch(() => null)));
       }
 
@@ -3570,9 +3607,9 @@
     bookmarks:  () => buildCard('Bookmarks',          'star',       'bookmarks'),
     recents:    () => buildCard('Recent Records',     'history',    'recents'),
     archive:    () => buildArchiveCard(),
-    myorders:   () => buildMyOrdersCard(),
-    myquotes:   () => buildMyQuotesCard(),
-    mypos:      () => buildMyPOsCard(),
+    myorders:   () => buildAgentCard('myorders'),
+    myquotes:   () => buildAgentCard('myquotes'),
+    mypos:      () => buildAgentCard('mypos'),
     preps:      () => buildPrepsCard(),
   };
 
@@ -3812,133 +3849,92 @@
 
   // ── My Orders card ─────────────────────────────────────────────────
 
-  function buildMyOrdersCard() {
-    const card = buildCard('My Orders', 'assignment', 'myorders');
+  // Shared builder for the agent-driven section cards (My Orders / My POs / My Quotes).
+  // Per-card differences come from AGENT_SECTIONS; an optional cfg.buildExtras(card, frag, load)
+  // hook adds extra cfg-bar controls (e.g. the My Quotes due-date toggle).
+  function buildAgentCard(cardId) {
+    const cfg = AGENT_SECTIONS[cardId];
+    const card = buildCard(cfg.title, cfg.icon, cardId);
+    const load = (force) => loadAgentSection(cardId, force);
 
     const agentInput = document.createElement('input');
     agentInput.type = 'text';
     agentInput.placeholder = 'Agent name…';
-    agentInput.value = localStorage.getItem(MY_ORDERS_AGENT_KEY) || '';
-    agentInput.style.cssText = `
-      width: 100%; min-width: 0; background: #141414; color: #ccc; border: 1px solid #333;
-      border-radius: 3px; padding: 5px 9px; font-size: 13px; font-family: inherit; outline: none;
-    `;
+    agentInput.value = localStorage.getItem(cfg.agentKey) || '';
+    agentInput.style.cssText = CFG_INPUT_CSS;
     agentInput.addEventListener('click', e => e.stopPropagation());
     agentInput.addEventListener('dragstart', e => e.stopPropagation());
 
-    const applyBtn = el('button', `
-      background: #1a3a1a; border: 1px solid #2a5a2a; color: #8ac; border-radius: 3px;
-      padding: 5px 10px; font-size: 13px; cursor: pointer; flex-shrink: 0; white-space: nowrap;
-    `, 'Apply');
+    const applyBtn = el('button', CFG_APPLY_BTN_CSS, 'Apply');
     applyBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       const name = agentInput.value.trim();
-      if (name) localStorage.setItem(MY_ORDERS_AGENT_KEY, name);
-      else localStorage.removeItem(MY_ORDERS_AGENT_KEY);
-      clearCachedSection('myorders');
-      loadMyOrders();
+      if (name) localStorage.setItem(cfg.agentKey, name);
+      else localStorage.removeItem(cfg.agentKey);
+      clearCachedSection(cardId);
+      load();
     });
     agentInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyBtn.click(); e.stopPropagation(); });
 
-    const sortBtn = el('i', `font-size: 15px; cursor: pointer; flex-shrink: 0;
-      color: ${getBuiltinSort('myorders') ? '#5a9a5a' : '#444'}; transition: color 0.15s;`);
+    // Sort button colour reflects whether a sort is active, so it can't use makeIconButton.
+    const sortColor = () => getBuiltinSort(cardId) ? '#5a9a5a' : '#444';
+    const sortBtn = el('i', `font-size: 15px; cursor: pointer; flex-shrink: 0; color: ${sortColor()}; transition: color 0.15s;`);
     sortBtn.className = 'material-icons';
     sortBtn.textContent = 'swap_vert';
     sortBtn.title = 'Sort';
-    sortBtn.addEventListener('mouseenter', () => sortBtn.style.color = getBuiltinSort('myorders') ? '#7aca7a' : '#888');
-    sortBtn.addEventListener('mouseleave', () => sortBtn.style.color = getBuiltinSort('myorders') ? '#5a9a5a' : '#444');
-    sortBtn.addEventListener('click', (e) => { e.stopPropagation(); openBuiltinSortMenu(sortBtn, 'myorders', loadMyOrders); });
+    sortBtn.addEventListener('mouseenter', () => sortBtn.style.color = getBuiltinSort(cardId) ? '#7aca7a' : '#888');
+    sortBtn.addEventListener('mouseleave', () => sortBtn.style.color = sortColor());
+    sortBtn.addEventListener('click', (e) => { e.stopPropagation(); openBuiltinSortMenu(sortBtn, cardId, load); });
 
-    const refreshBtn = el('i', `font-size: 15px; color: #444; cursor: pointer; flex-shrink: 0; transition: color 0.15s;`);
-    refreshBtn.className = 'material-icons';
-    refreshBtn.textContent = 'refresh';
-    refreshBtn.title = 'Refresh';
-    refreshBtn.addEventListener('mouseenter', () => refreshBtn.style.color = '#8ac');
-    refreshBtn.addEventListener('mouseleave', () => refreshBtn.style.color = '#444');
-    refreshBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      clearCachedSection('myorders');
-      loadMyOrders(true);
+    const refreshBtn = makeIconButton('refresh', {
+      title: 'Refresh',
+      onClick: () => { clearCachedSection(cardId); load(true); },
     });
 
-    // Prepend agent input and apply to the cfg bar (badge toggle and remove × already there)
+    // Prepend agent input + apply to the cfg bar (badge toggle and remove × already there)
     const inputWrap = el('div', '');
     inputWrap.className = 'rq-cfg-input-wrap';
     inputWrap.appendChild(agentInput);
     const frag = document.createDocumentFragment();
     frag.append(inputWrap, applyBtn);
+    cfg.buildExtras?.(card, frag, load);
     card._cfgBar.insertBefore(frag, card._cfgBar.firstChild);
-    // cfgBar: [inputWrap][applyBtn][badgeToggleBtn][removeBtn×]
 
-    // Header: insert sort before cfg toggle, refresh before collapse
+    // Header: sort before cfg toggle, refresh before collapse
     card._cfgToggleBtn.insertAdjacentElement('beforebegin', sortBtn);
     card._collapseBtn.insertAdjacentElement('beforebegin', refreshBtn);
-    // Header order: …filterBtn, sortBtn, cfgToggleBtn, refreshBtn, collapseBtn ✓
-
     return card;
   }
 
-  // ── My POs card ────────────────────────────────────────────────────
-
-  function buildMyPOsCard() {
-    const card = buildCard('My POs', 'shopping_cart', 'mypos');
-
-    const agentInput = document.createElement('input');
-    agentInput.type = 'text';
-    agentInput.placeholder = 'Agent name…';
-    agentInput.value = localStorage.getItem(MY_POS_AGENT_KEY) || '';
-    agentInput.style.cssText = `
-      width: 100%; min-width: 0; background: #141414; color: #ccc; border: 1px solid #333;
-      border-radius: 3px; padding: 5px 9px; font-size: 13px; font-family: inherit; outline: none;
-    `;
-    agentInput.addEventListener('click', e => e.stopPropagation());
-    agentInput.addEventListener('dragstart', e => e.stopPropagation());
-
-    const applyBtn = el('button', `
-      background: #1a3a1a; border: 1px solid #2a5a2a; color: #8ac; border-radius: 3px;
-      padding: 5px 10px; font-size: 13px; cursor: pointer; flex-shrink: 0; white-space: nowrap;
-    `, 'Apply');
-    applyBtn.addEventListener('click', (e) => {
+  // My Quotes only: a cfg-bar toggle for whether the due-date badge uses the quote's
+  // start date or end date. Appended after the Apply button.
+  function addQuotesDueToggle(card, frag, load) {
+    const dueDateBtn = el('button', `
+      background: #1a1a2a; border: 1px solid #2a2a4a; color: #8ab; border-radius: 3px;
+      padding: 5px 8px; font-size: 11px; cursor: pointer; flex-shrink: 0; white-space: nowrap;
+      transition: color 0.15s, border-color 0.15s;
+    `);
+    const applyDueDateBtn = () => {
+      const useStart = localStorage.getItem(MY_QUOTES_DUE_KEY) === 'start';
+      dueDateBtn.textContent = useStart ? 'due: start' : 'due: end';
+      dueDateBtn.title = useStart ? 'Showing start date — click to use end date' : 'Showing end date — click to use start date';
+      dueDateBtn.style.borderColor = useStart ? '#4a6a8a' : '#2a2a4a';
+      dueDateBtn.style.color = useStart ? '#acd' : '#8ab';
+    };
+    applyDueDateBtn();
+    dueDateBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const name = agentInput.value.trim();
-      if (name) localStorage.setItem(MY_POS_AGENT_KEY, name);
-      else localStorage.removeItem(MY_POS_AGENT_KEY);
-      clearCachedSection('mypos');
-      loadMyPOs();
+      const nowStart = localStorage.getItem(MY_QUOTES_DUE_KEY) !== 'start';
+      localStorage.setItem(MY_QUOTES_DUE_KEY, nowStart ? 'start' : 'stop');
+      applyDueDateBtn();
+      const body = document.getElementById('rq-card-body-myquotes');
+      body?.querySelectorAll('.rq-card-row').forEach(row => {
+        row.querySelectorAll('.rq-due-badge').forEach(b => b.remove());
+        const rn = row.dataset.recordNumber;
+        if (rn) attachDueBadge(row, 'Quote', rn, null, 'myquotes');
+      });
     });
-    agentInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyBtn.click(); e.stopPropagation(); });
-
-    const sortBtn = el('i', `font-size: 15px; cursor: pointer; flex-shrink: 0;
-      color: ${getBuiltinSort('mypos') ? '#5a9a5a' : '#444'}; transition: color 0.15s;`);
-    sortBtn.className = 'material-icons';
-    sortBtn.textContent = 'swap_vert';
-    sortBtn.title = 'Sort';
-    sortBtn.addEventListener('mouseenter', () => sortBtn.style.color = getBuiltinSort('mypos') ? '#7aca7a' : '#888');
-    sortBtn.addEventListener('mouseleave', () => sortBtn.style.color = getBuiltinSort('mypos') ? '#5a9a5a' : '#444');
-    sortBtn.addEventListener('click', (e) => { e.stopPropagation(); openBuiltinSortMenu(sortBtn, 'mypos', loadMyPOs); });
-
-    const refreshBtn = el('i', `font-size: 15px; color: #444; cursor: pointer; flex-shrink: 0; transition: color 0.15s;`);
-    refreshBtn.className = 'material-icons';
-    refreshBtn.textContent = 'refresh';
-    refreshBtn.title = 'Refresh';
-    refreshBtn.addEventListener('mouseenter', () => refreshBtn.style.color = '#8ac');
-    refreshBtn.addEventListener('mouseleave', () => refreshBtn.style.color = '#444');
-    refreshBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      clearCachedSection('mypos');
-      loadMyPOs(true);
-    });
-
-    const inputWrap = el('div', '');
-    inputWrap.className = 'rq-cfg-input-wrap';
-    inputWrap.appendChild(agentInput);
-    const frag = document.createDocumentFragment();
-    frag.append(inputWrap, applyBtn);
-    card._cfgBar.insertBefore(frag, card._cfgBar.firstChild);
-
-    card._cfgToggleBtn.insertAdjacentElement('beforebegin', sortBtn);
-    card._collapseBtn.insertAdjacentElement('beforebegin', refreshBtn);
-    return card;
+    frag.append(dueDateBtn);
   }
 
   // ── Agent-driven sections (My Orders / My POs / My Quotes) ─────────
@@ -3948,15 +3944,16 @@
   // is older than AGENT_CACHE_TTL (or forceRefresh is set). The spinner shows
   // only on a cold cache; a failed background refresh leaves stale data in place.
   const AGENT_SECTIONS = {
-    myorders: { agentKey: MY_ORDERS_AGENT_KEY, controller: 'OrderController',
+    myorders: { title: 'My Orders', agentKey: MY_ORDERS_AGENT_KEY, controller: 'OrderController',
                 module: 'Order',         icon: 'assignment',    numberField: 'OrderNumber',
                 hidden: ['CANCELLED', 'CLOSED'],            unavailable: 'Order module not available',          failed: 'Failed to load orders' },
-    mypos:    { agentKey: MY_POS_AGENT_KEY,    controller: 'PurchaseOrderController',
+    mypos:    { title: 'My POs', agentKey: MY_POS_AGENT_KEY,    controller: 'PurchaseOrderController',
                 module: 'PurchaseOrder', icon: 'shopping_cart', numberField: 'PurchaseOrderNumber',
                 hidden: ['CLOSED', 'VOID'],                 unavailable: 'Purchase Order module not available', failed: 'Failed to load POs' },
-    myquotes: { agentKey: MY_QUOTES_AGENT_KEY, controller: 'QuoteController',
+    myquotes: { title: 'My Quotes', agentKey: MY_QUOTES_AGENT_KEY, controller: 'QuoteController',
                 module: 'Quote',         icon: 'request_quote', numberField: 'QuoteNumber',
-                hidden: ['CANCELLED', 'CLOSED', 'ORDERED'], unavailable: 'Quote module not available',          failed: 'Failed to load quotes' },
+                hidden: ['CANCELLED', 'CLOSED', 'ORDERED'], unavailable: 'Quote module not available',          failed: 'Failed to load quotes',
+                buildExtras: addQuotesDueToggle },
   };
 
   // Pre-populate detailCache from list items so sort-by-date/amount works
@@ -3977,7 +3974,7 @@
 
     const agent = localStorage.getItem(cfg.agentKey);
     if (!agent) {
-      body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Set your agent name above</div>';
+      body.innerHTML = placeholderHTML('Set your agent name above');
       return;
     }
 
@@ -3993,11 +3990,11 @@
 
     // Hit the network only when forced or when the cache is stale/cold.
     if (!forceRefresh && fresh) return;
-    if (!cached) body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Loading…</div>';
+    if (!cached) body.innerHTML = placeholderHTML('Loading…');
 
     const controller = window[cfg.controller];
     if (!controller?.apiurl) {
-      if (!cached) body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">' + cfg.unavailable + '</div>';
+      if (!cached) body.innerHTML = placeholderHTML(cfg.unavailable);
       return;
     }
 
@@ -4020,7 +4017,7 @@
       })
       .catch(() => {
         // Leave stale data visible on a background-refresh failure; only a cold cache shows the error.
-        if (!cached) body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">' + cfg.failed + '</div>';
+        if (!cached) body.innerHTML = placeholderHTML(cfg.failed);
       });
   }
 
@@ -4034,7 +4031,7 @@
     body.innerHTML = '';
 
     if (!apiItems || apiItems.length === 0) {
-      body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">No records found</div>';
+      body.innerHTML = placeholderHTML('No records found');
       return;
     }
 
@@ -4072,92 +4069,6 @@
 
   function loadMyOrders(forceRefresh = false) { loadAgentSection('myorders', forceRefresh); }
 
-  function buildMyQuotesCard() {
-    const card = buildCard('My Quotes', 'request_quote', 'myquotes');
-    const agentInput = document.createElement('input');
-    agentInput.type = 'text';
-    agentInput.placeholder = 'Agent name…';
-    agentInput.value = localStorage.getItem(MY_QUOTES_AGENT_KEY) || '';
-    agentInput.style.cssText = `
-      width: 100%; min-width: 0; background: #141414; color: #ccc; border: 1px solid #333;
-      border-radius: 3px; padding: 5px 9px; font-size: 13px; font-family: inherit; outline: none;
-    `;
-    agentInput.addEventListener('click', e => e.stopPropagation());
-    agentInput.addEventListener('dragstart', e => e.stopPropagation());
-    const applyBtn = el('button', `
-      background: #1a3a1a; border: 1px solid #2a5a2a; color: #8ac; border-radius: 3px;
-      padding: 5px 10px; font-size: 13px; cursor: pointer; flex-shrink: 0; white-space: nowrap;
-    `, 'Apply');
-    applyBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const name = agentInput.value.trim();
-      if (name) localStorage.setItem(MY_QUOTES_AGENT_KEY, name);
-      else localStorage.removeItem(MY_QUOTES_AGENT_KEY);
-      clearCachedSection('myquotes');
-      loadMyQuotes();
-    });
-    agentInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyBtn.click(); e.stopPropagation(); });
-
-    const sortBtn = el('i', `font-size: 15px; cursor: pointer; flex-shrink: 0;
-      color: ${getBuiltinSort('myquotes') ? '#5a9a5a' : '#444'}; transition: color 0.15s;`);
-    sortBtn.className = 'material-icons';
-    sortBtn.textContent = 'swap_vert';
-    sortBtn.title = 'Sort';
-    sortBtn.addEventListener('mouseenter', () => sortBtn.style.color = getBuiltinSort('myquotes') ? '#7aca7a' : '#888');
-    sortBtn.addEventListener('mouseleave', () => sortBtn.style.color = getBuiltinSort('myquotes') ? '#5a9a5a' : '#444');
-    sortBtn.addEventListener('click', (e) => { e.stopPropagation(); openBuiltinSortMenu(sortBtn, 'myquotes', loadMyQuotes); });
-
-    const refreshBtn = el('i', `font-size: 15px; color: #444; cursor: pointer; flex-shrink: 0; transition: color 0.15s;`);
-    refreshBtn.className = 'material-icons';
-    refreshBtn.textContent = 'refresh';
-    refreshBtn.title = 'Refresh';
-    refreshBtn.addEventListener('mouseenter', () => refreshBtn.style.color = '#8ac');
-    refreshBtn.addEventListener('mouseleave', () => refreshBtn.style.color = '#444');
-    refreshBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      clearCachedSection('myquotes');
-      loadMyQuotes(true);
-    });
-
-    // Due-date field toggle: start date vs end date
-    const dueDateBtn = el('button', `
-      background: #1a1a2a; border: 1px solid #2a2a4a; color: #8ab; border-radius: 3px;
-      padding: 5px 8px; font-size: 11px; cursor: pointer; flex-shrink: 0; white-space: nowrap;
-      transition: color 0.15s, border-color 0.15s;
-    `);
-    const applyDueDateBtn = () => {
-      const useStart = localStorage.getItem(MY_QUOTES_DUE_KEY) === 'start';
-      dueDateBtn.textContent = useStart ? 'due: start' : 'due: end';
-      dueDateBtn.title = useStart ? 'Showing start date — click to use end date' : 'Showing end date — click to use start date';
-      dueDateBtn.style.borderColor = useStart ? '#4a6a8a' : '#2a2a4a';
-      dueDateBtn.style.color = useStart ? '#acd' : '#8ab';
-    };
-    applyDueDateBtn();
-    dueDateBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const nowStart = localStorage.getItem(MY_QUOTES_DUE_KEY) !== 'start';
-      localStorage.setItem(MY_QUOTES_DUE_KEY, nowStart ? 'start' : 'stop');
-      applyDueDateBtn();
-      const body = document.getElementById('rq-card-body-myquotes');
-      body?.querySelectorAll('.rq-card-row').forEach(row => {
-        row.querySelectorAll('.rq-due-badge').forEach(b => b.remove());
-        const rn = row.dataset.recordNumber;
-        if (rn) attachDueBadge(row, 'Quote', rn, null, 'myquotes');
-      });
-    });
-
-    const inputWrap = el('div', '');
-    inputWrap.className = 'rq-cfg-input-wrap';
-    inputWrap.appendChild(agentInput);
-    const frag = document.createDocumentFragment();
-    frag.append(inputWrap, applyBtn, dueDateBtn);
-    card._cfgBar.insertBefore(frag, card._cfgBar.firstChild);
-
-    card._cfgToggleBtn.insertAdjacentElement('beforebegin', sortBtn);
-    card._collapseBtn.insertAdjacentElement('beforebegin', refreshBtn);
-    return card;
-  }
-
   function loadMyQuotes(forceRefresh = false) { loadAgentSection('myquotes', forceRefresh); }
 
   // ── Preps card (Google Sheets daily prep schedule) ─────────────────
@@ -4169,17 +4080,11 @@
     urlInput.type = 'text';
     urlInput.placeholder = 'Google Sheet URL…';
     urlInput.value = localStorage.getItem(PREPS_SHEET_KEY) || '';
-    urlInput.style.cssText = `
-      width: 100%; min-width: 0; background: #141414; color: #ccc; border: 1px solid #333;
-      border-radius: 3px; padding: 5px 9px; font-size: 13px; font-family: inherit; outline: none;
-    `;
+    urlInput.style.cssText = CFG_INPUT_CSS;
     urlInput.addEventListener('click', e => e.stopPropagation());
     urlInput.addEventListener('dragstart', e => e.stopPropagation());
 
-    const applyBtn = el('button', `
-      background: #1a3a1a; border: 1px solid #2a5a2a; color: #8ac; border-radius: 3px;
-      padding: 5px 10px; font-size: 13px; cursor: pointer; flex-shrink: 0; white-space: nowrap;
-    `, 'Apply');
+    const applyBtn = el('button', CFG_APPLY_BTN_CSS, 'Apply');
     applyBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       const url = urlInput.value.trim();
@@ -4190,32 +4095,21 @@
     });
     urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyBtn.click(); e.stopPropagation(); });
 
-    const refreshBtn = el('i', `font-size: 15px; color: #444; cursor: pointer; flex-shrink: 0; transition: color 0.15s;`);
-    refreshBtn.className = 'material-icons';
-    refreshBtn.textContent = 'refresh';
-    refreshBtn.title = 'Refresh';
-    refreshBtn.addEventListener('mouseenter', () => refreshBtn.style.color = '#8ac');
-    refreshBtn.addEventListener('mouseleave', () => refreshBtn.style.color = '#444');
-    refreshBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      clearPrepsCache();
-      loadPreps();
+    const refreshBtn = makeIconButton('refresh', {
+      title: 'Refresh',
+      onClick: () => { clearPrepsCache(); loadPreps(); },
     });
 
-    const viewBtn = el('i', `font-size: 15px; color: #444; cursor: pointer; flex-shrink: 0; transition: color 0.15s;`);
-    viewBtn.className = 'material-icons';
     const currentView = localStorage.getItem(PREPS_VIEW_KEY) || 'list';
-    viewBtn.textContent = currentView === 'floor' ? 'list' : 'grid_view';
-    viewBtn.title = currentView === 'floor' ? 'Switch to list view' : 'Switch to floor plan view';
-    viewBtn.addEventListener('mouseenter', () => viewBtn.style.color = '#8ac');
-    viewBtn.addEventListener('mouseleave', () => viewBtn.style.color = '#444');
-    viewBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const next = (localStorage.getItem(PREPS_VIEW_KEY) || 'list') === 'floor' ? 'list' : 'floor';
-      localStorage.setItem(PREPS_VIEW_KEY, next);
-      viewBtn.textContent = next === 'floor' ? 'list' : 'grid_view';
-      viewBtn.title = next === 'floor' ? 'Switch to list view' : 'Switch to floor plan view';
-      const _pc = getCachedPreps(); if (_pc) renderPreps(_pc.groups, _pc.rwData);
+    const viewBtn = makeIconButton(currentView === 'floor' ? 'list' : 'grid_view', {
+      title: currentView === 'floor' ? 'Switch to list view' : 'Switch to floor plan view',
+      onClick: () => {
+        const next = (localStorage.getItem(PREPS_VIEW_KEY) || 'list') === 'floor' ? 'list' : 'floor';
+        localStorage.setItem(PREPS_VIEW_KEY, next);
+        viewBtn.textContent = next === 'floor' ? 'list' : 'grid_view';
+        viewBtn.title = next === 'floor' ? 'Switch to list view' : 'Switch to floor plan view';
+        const _pc = getCachedPreps(); if (_pc) renderPreps(_pc.groups, _pc.rwData);
+      },
     });
 
     // Preps don't have due-date badges — remove badge toggle from cfg bar
@@ -4234,17 +4128,11 @@
     webhookInput.type = 'text';
     webhookInput.placeholder = 'Monitor webhook URL (Apps Script)…';
     webhookInput.value = localStorage.getItem(MONITOR_WEBHOOK_KEY) || '';
-    webhookInput.style.cssText = `
-      width: 100%; min-width: 0; background: #141414; color: #ccc; border: 1px solid #333;
-      border-radius: 3px; padding: 5px 9px; font-size: 13px; font-family: inherit; outline: none;
-    `;
+    webhookInput.style.cssText = CFG_INPUT_CSS;
     webhookInput.addEventListener('click', e => e.stopPropagation());
     webhookInput.addEventListener('dragstart', e => e.stopPropagation());
 
-    const webhookApplyBtn = el('button', `
-      background: #1a3a1a; border: 1px solid #2a5a2a; color: #8ac; border-radius: 3px;
-      padding: 5px 10px; font-size: 13px; cursor: pointer; flex-shrink: 0; white-space: nowrap;
-    `, 'Apply');
+    const webhookApplyBtn = el('button', CFG_APPLY_BTN_CSS, 'Apply');
     webhookApplyBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       const url = webhookInput.value.trim();
@@ -4329,12 +4217,12 @@
 
     const sheetUrl = localStorage.getItem(PREPS_SHEET_KEY);
     if (!sheetUrl) {
-      body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Paste your Google Sheet URL above</div>';
+      body.innerHTML = placeholderHTML('Paste your Google Sheet URL above');
       return;
     }
     const sheetId = getSheetIdFromUrl(sheetUrl);
     if (!sheetId) {
-      body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Invalid sheet URL</div>';
+      body.innerHTML = placeholderHTML('Invalid sheet URL');
       return;
     }
 
@@ -4349,7 +4237,7 @@
 
     // Refetch only when forced or when the cache is stale/cold.
     if (!forceRefresh && prepsFresh) return;
-    if (!cachedPreps) body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Loading…</div>';
+    if (!cachedPreps) body.innerHTML = placeholderHTML('Loading…');
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -4377,7 +4265,7 @@
       renderPreps(groups, rwData);
     } catch {
       // Leave stale data visible on a background-refresh failure; only a cold cache shows the error.
-      if (!cachedPreps) body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">Failed to load preps</div>';
+      if (!cachedPreps) body.innerHTML = placeholderHTML('Failed to load preps');
     }
   }
 
@@ -4589,7 +4477,7 @@
     body.innerHTML = '';
 
     if (!groups.length) {
-      body.innerHTML = '<div style="padding:8px 14px;color:#555;font-style:italic;font-size:12px;">No upcoming preps found</div>';
+      body.innerHTML = placeholderHTML('No upcoming preps found');
       return;
     }
 
@@ -5073,8 +4961,7 @@
           description,
           r.recordNumber,
           () => {
-            RQ.api.get_id_from_code(r.module, r.recordNumber)
-              .then(id => { if (id) RQ.api.open_form_tab(r.module, id); });
+            RQ.api.open_record_by_number(r.module, r.recordNumber);
           },
           { icon: MODULE_ICONS[r.module] ?? 'open_in_new', primary: description, secondary: r.recordNumber, module: r.module, recordNumber: r.recordNumber, cardId: 'recents' }
         );
@@ -5592,8 +5479,7 @@
     const upgrades = MODULE_UPGRADES[module];
     if (!upgrades) {
       // No upgrade path — open directly
-      RQ.api.get_id_from_code(module, recordNumber)
-        .then(id => { if (id) RQ.api.open_form_tab(module, id); });
+      RQ.api.open_record_by_number(module, recordNumber);
       return;
     }
 
@@ -5607,8 +5493,7 @@
 
       if (!targetId) {
         // Upgraded module not found, fall back to original
-        RQ.api.get_id_from_code(module, recordNumber)
-          .then(id => { if (id) RQ.api.open_form_tab(module, id); });
+        RQ.api.open_record_by_number(module, recordNumber);
         return;
       }
 

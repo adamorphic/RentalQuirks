@@ -11,8 +11,6 @@
 //     data-name     — internal module name (used by RQ.api calls)
 //     data-code     — (optional) item code field name, e.g. "ICode"
 
-console.log('--- LOCAL FILE LOADED ---');
-
 (function initFeatureFlags(RQ) {
     const defaults = {
         customEntries: true,
@@ -508,8 +506,7 @@ if (e.ctrlKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
       });
       setTimeout(() => {
         formTabs.forEach(tab => {
-          RQ.api.get_id_from_code(tab.module, tab.recordNumber)
-            .then(id => { if (id) RQ.api.open_form_tab(tab.module, id); });
+          RQ.api.open_record_by_number(tab.module, tab.recordNumber);
         });
       }, 1000);
     }, closeFirst ? 500 : 0);
@@ -901,8 +898,7 @@ del.addEventListener('mouseleave', () => { del.style.color = '#f88'; del.style.b
 
   window.RQ_bookmarks = { loadBookmarks, buildBookmarkRows };
   window._rqOpenRecord = function(bookmark) {
-    RQ.api.get_id_from_code(bookmark.module, bookmark.recordNumber)
-      .then(id => { if (id) RQ.api.open_form_tab(bookmark.module, id); });
+    RQ.api.open_record_by_number(bookmark.module, bookmark.recordNumber);
   };
 
   function initBookmarks() {
@@ -1263,8 +1259,7 @@ del.addEventListener('mouseleave', () => { del.style.color = '#f88'; del.style.b
 
       row.addEventListener('mousedown', (e) => {
         e.preventDefault();
-        RQ.api.get_id_from_code(entry.module, entry.recordNumber)
-          .then(id => { if (id) RQ.api.open_form_tab(entry.module, id); });
+        RQ.api.open_record_by_number(entry.module, entry.recordNumber);
         document.getElementById('rq-quiknav')?.blur();
       });
 

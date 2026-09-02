@@ -135,6 +135,16 @@
             }
         };
 
+        // Opens a record's form tab given its user-facing number/code (e.g. "A01XV91G").
+        // Resolves the internal id then opens the tab. Returns the promise (resolving to the
+        // id, or undefined if not found); rejections propagate to the caller's .catch().
+        RQ.api.open_record_by_number = function (module_name, record_number) {
+            return RQ.api.get_id_from_code(module_name, record_number).then(id => {
+                if (id) RQ.api.open_form_tab(module_name, id);
+                return id;
+            });
+        };
+
         RQ.api.new_record_tab = function (module_name) {
             if ("function" == typeof window[module_name + "Controller"].openForm) {
                 let new_form = window[module_name + "Controller"].openForm("NEW");

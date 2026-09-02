@@ -141,8 +141,7 @@
                 // Check if a recent record item is selected instead
                 let selected_recent = RQ.quiknav.popup.querySelector('.rq-recent-item.selected');
                 if (selected_recent) {
-                    RQ.api.get_id_from_code(selected_recent.dataset.module, selected_recent.dataset.recordNumber)
-                        .then(id => { if (id) RQ.api.open_form_tab(selected_recent.dataset.module, id); });
+                    RQ.api.open_record_by_number(selected_recent.dataset.module, selected_recent.dataset.recordNumber);
                     searchbox.blur();
                     e.preventDefault();
                 }
