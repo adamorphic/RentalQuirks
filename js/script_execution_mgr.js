@@ -3,7 +3,6 @@
 window.RentalQuirks = {};
 RentalQuirks.runAlways = []; // Scripts are run on every DOM mutation. If any function returns true, all subsequent functions are skipped for that batch.
 RentalQuirks.runOnPage = []; // Scripts are validated on page navigation with testPath(path), and then valid scripts have runScript() run on DOM mutations until runScript returns true.
-RentalQuirks.navTimestamp = 0;
 RentalQuirks.debug = false; // Set to true (e.g. from the console: RentalQuirks.debug = true) to enable verbose RQ console logging.
 
 // Since RentalWorks (rentalworks.cloud) acts as a single-page application, we need to make
@@ -15,7 +14,6 @@ RentalQuirks.debug = false; // Set to true (e.g. from the console: RentalQuirks.
   let pageScripts = [];
 
   function onNavigate() {
-    RentalQuirks.navTimestamp = Date.now();
     let path = location.pathname.slice(1) + location.search + location.hash; // Remove the leading slash
     pageScripts = runOnPage.filter(script => script.testPath(path));
     tryRun();
@@ -39,10 +37,6 @@ RentalQuirks.debug = false; // Set to true (e.g. from the console: RentalQuirks.
   // Run immediately for the current page on load
   onNavigate();
 })(RentalQuirks.runAlways, RentalQuirks.runOnPage);
-
-function msSincePageNav() {
-  return Date.now() - RentalQuirks.navTimestamp;
-}
 
 
 /**

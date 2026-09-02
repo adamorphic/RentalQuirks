@@ -99,10 +99,6 @@
     }
   }
 
-  function saveSectionOrder(order) {
-    localStorage.setItem(SECTION_ORDER_KEY, JSON.stringify(order));
-  }
-
   // ── Tab storage ────────────────────────────────────────────────────
   function loadTabs() {
     try {
@@ -860,79 +856,6 @@
     closeOnOutsideClick(menu);
   }
 
-  function showStatusContextMenu(e, badge, module, rn, renderFn) {
-    e.preventDefault(); e.stopPropagation();
-    document.getElementById('rq-status-ctx')?.remove();
-    document.getElementById('rq-wf-picker')?.remove();
-    const assignment = getRecordStatus(module, rn);
-    const workflows  = loadWorkflows();
-    const activeWf   = assignment ? workflows.find(w => w.id === assignment.workflowId) : null;
-
-    const menu = el('div', `
-      position:fixed;z-index:200000;background:#242424;border:1px solid #444;
-      border-radius:6px;padding:4px 0;box-shadow:0 4px 16px rgba(0,0,0,.6);
-      min-width:160px;font-size:12px;
-    `);
-    menu.id = 'rq-status-ctx';
-
-    const closeMenu = () => { menu.remove(); document.removeEventListener('mousedown', outsideClose, true); };
-    const outsideClose = (ev) => { if (!menu.contains(ev.target)) closeMenu(); };
-
-    if (activeWf) {
-      const header = el('div', 'padding:4px 14px 5px;font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.08em;');
-      header.textContent = activeWf.name;
-      const divider1 = el('div', 'border-top:1px solid #333;margin:3px 0;');
-      menu.append(header, divider1);
-    }
-
-    // Switch workflow item
-    const switchItem = el('div', 'padding:6px 14px;cursor:pointer;color:#e0e0e0;display:flex;align-items:center;justify-content:space-between;');
-    switchItem.innerHTML = 'Switch workflow <span style="color:#666;font-size:10px;">▶</span>';
-    switchItem.addEventListener('mouseenter', () => switchItem.style.background = '#333');
-    switchItem.addEventListener('mouseleave', () => switchItem.style.background = '');
-    switchItem.addEventListener('mousedown', (ev) => {
-      ev.preventDefault(); ev.stopPropagation();
-      closeMenu();
-      showWorkflowPicker(badge, module, rn, renderFn);
-    });
-
-    // Clear item
-    const clearItem = el('div', 'padding:6px 14px;cursor:pointer;color:#e0e0e0;');
-    clearItem.textContent = 'Clear status';
-    clearItem.addEventListener('mouseenter', () => clearItem.style.background = '#333');
-    clearItem.addEventListener('mouseleave', () => clearItem.style.background = '');
-    clearItem.addEventListener('mousedown', (ev) => {
-      ev.preventDefault(); ev.stopPropagation();
-      setRecordStatus(module, rn, null);
-      closeMenu();
-      renderFn();
-    });
-
-    const divider2 = el('div', 'border-top:1px solid #333;margin:3px 0;');
-
-    // Edit workflows item
-    const editItem = el('div', 'padding:6px 14px;cursor:pointer;color:#e0e0e0;');
-    editItem.textContent = 'Edit workflows\u2026';
-    editItem.addEventListener('mouseenter', () => editItem.style.background = '#333');
-    editItem.addEventListener('mouseleave', () => editItem.style.background = '');
-    editItem.addEventListener('mousedown', (ev) => {
-      ev.preventDefault(); ev.stopPropagation();
-      closeMenu();
-      showWorkflowEditor();
-    });
-
-    menu.append(switchItem, clearItem, divider2, editItem);
-    document.body.appendChild(menu);
-    const panelEl = document.getElementById('rq-dashboard');
-    menu.addEventListener('mouseenter', () => panelEl?._cancelClose?.());
-    menu.addEventListener('mouseleave', (ev) => {
-      if (!ev.relatedTarget?.closest?.('#rq-dashboard, #rq-status-ctx, #rq-wf-picker')) panelEl?._scheduleClose?.();
-    });
-    menu.style.left = Math.min(e.clientX, window.innerWidth  - 180) + 'px';
-    menu.style.top  = Math.min(e.clientY, window.innerHeight - 160) + 'px';
-    setTimeout(() => document.addEventListener('mousedown', outsideClose, true), 0);
-  }
-
   function showWorkflowEditor() {
     document.getElementById('rq-wf-editor')?.remove();
 
@@ -1159,57 +1082,6 @@
     document.body.appendChild(overlay);
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) overlay.remove(); });
   }
-
-  function attachPersonalStatusBadge(row, module, rn) {
-    if (!['Order', 'Quote', 'PurchaseOrder'].includes(module) || !rn) return;
-
-    const badge = el('div', `
-      font-size:10px;font-weight:700;letter-spacing:.04em;
-      padding:1px 7px;border-radius:9px;cursor:pointer;
-      user-select:none;flex-shrink:0;white-space:nowrap;
-    `);
-
-    function render() {
-      const assignment = getRecordStatus(module, rn);
-      if (!assignment) {
-        badge.textContent = '+';
-        badge.title = 'Set my status';
-        badge.style.cssText += 'background:#2a2a2a;color:#555;border:1px solid #383838;';
-      } else {
-        const wf = loadWorkflows().find(w => w.id === assignment.workflowId);
-        const st = wf?.statuses.find(s => s.label === assignment.status);
-        const color = st?.color ?? '#555';
-        badge.textContent = assignment.status;
-        badge.title = `My status: ${assignment.status}\nLeft-click to advance · Right-click for options`;
-        badge.style.background = color;
-        badge.style.color = '#fff';
-        badge.style.border = `1px solid ${color}`;
-      }
-    }
-
-    render();
-
-    badge.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const assignment = getRecordStatus(module, rn);
-      if (!assignment) {
-        showWorkflowPicker(badge, module, rn, render);
-        return;
-      }
-      const wf = loadWorkflows().find(w => w.id === assignment.workflowId);
-      if (!wf) { setRecordStatus(module, rn, null); render(); return; }
-      const idx = wf.statuses.findIndex(s => s.label === assignment.status);
-      const next = wf.statuses[idx + 1];
-      if (next) setRecordStatus(module, rn, { workflowId: wf.id, status: next.label });
-      else setRecordStatus(module, rn, null);
-      render();
-    });
-
-    badge.addEventListener('contextmenu', (e) => showStatusContextMenu(e, badge, module, rn, render));
-
-    row.appendChild(badge);
-  }
-  // ── End personal status badge ──────────────────────────────────────────────
 
   // ── RentalWorks status badge ───────────────────────────────────────────────
   const RW_STATUS_COLORS = {
@@ -2431,34 +2303,6 @@
     card.append(cardHeader, ...(filterRow ? [filterRow] : []), cfgBar, cardBody);
     makeCardReorderable(card, dragHandle);
     return card;
-  }
-
-  function attachCfgToggle(card, cardId, cfgEl) {
-    const HIDDEN_KEY = 'rq-cfg-hidden-' + cardId;
-    const hidden = localStorage.getItem(HIDDEN_KEY) === '1';
-    if (hidden) cfgEl.classList.add('rq-cfg-hidden');
-
-    const btn = el('i', `
-      font-size: 14px; color: ${hidden ? '#2a2a2a' : '#4a7a4a'}; cursor: pointer; flex-shrink: 0;
-      transition: color 0.15s;
-    `);
-    btn.className = 'material-icons';
-    btn.textContent = 'tune';
-    btn.title = hidden ? 'Show config bar' : 'Hide config bar';
-
-    btn.addEventListener('mouseenter', () => btn.style.color = '#8ac');
-    btn.addEventListener('mouseleave', () => btn.style.color = cfgEl.classList.contains('rq-cfg-hidden') ? '#2a2a2a' : '#4a7a4a');
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const nowHiding = !cfgEl.classList.contains('rq-cfg-hidden');
-      cfgEl.classList.toggle('rq-cfg-hidden', nowHiding);
-      localStorage.setItem(HIDDEN_KEY, nowHiding ? '1' : '0');
-      btn.style.color = nowHiding ? '#2a2a2a' : '#4a7a4a';
-      btn.title = nowHiding ? 'Show config bar' : 'Hide config bar';
-    });
-
-    // Insert before the remove button (last element in header)
-    card._cardHeader?.lastElementChild?.insertAdjacentElement('beforebegin', btn);
   }
 
   // ── Archive card ───────────────────────────────────────────────────

@@ -4,8 +4,6 @@
    It is not, however, global to the context of the webpage it is running on, so
    it is not polluting the page's window namespace.
 */
-/** Boolean value for any features that should only be run on the test/training domain */
-const IS_TEST_SITE = location.pathname == "/training/";
 /** The current RentalWorks URL up until (but excluding) the pound sign (#) */
 const RW_URL = window.applicationConfig?.apiurl ?? location.origin + location.pathname;
 
@@ -157,5 +155,3 @@ let WindowDragger = function (container) {
     drag_item = null;
   }
 };
-
-const LOG = console.log.bind(console);
