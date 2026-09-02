@@ -1,5 +1,18 @@
 <script>
-  const API = "PASTE_YOUR_APPS_SCRIPT_EXEC_URL_HERE";
+  // Apps Script /exec deployment URL. Deliberately not hardcoded: a deployment URL
+  // is a capability URL, so committing it to a public repo hands out access to the
+  // endpoint. Set it once per browser from the console:
+  //   localStorage.setItem('oni-api-url', 'https://script.google.com/macros/s/…/exec')
+  const API = localStorage.getItem('oni-api-url') || '';
+  if (!API) {
+    document.addEventListener('DOMContentLoaded', () => {
+      document.body.insertAdjacentHTML('afterbegin',
+        '<div style="background:#5a1a1a;color:#fdd;padding:10px 14px;font:13px sans-serif;">' +
+        'No Apps Script URL configured. Run in the console: ' +
+        "<code>localStorage.setItem('oni-api-url', '&lt;your /exec URL&gt;')</code> then reload." +
+        '</div>');
+    });
+  }
 
   // ── CLOCK ─────────────────────────────────────────────────────────────────
   function updateClock() {
