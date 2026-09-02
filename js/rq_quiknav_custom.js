@@ -11,8 +11,6 @@
 //     data-name     — internal module name (used by RQ.api calls)
 //     data-code     — (optional) item code field name, e.g. "ICode"
 
-console.log('--- LOCAL FILE LOADED ---');
-
 (function initFeatureFlags(RQ) {
     const defaults = {
         customEntries: true,
@@ -508,8 +506,7 @@ if (e.ctrlKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
       });
       setTimeout(() => {
         formTabs.forEach(tab => {
-          RQ.api.get_id_from_code(tab.module, tab.recordNumber)
-            .then(id => { if (id) RQ.api.open_form_tab(tab.module, id); });
+          RQ.api.open_record_by_number(tab.module, tab.recordNumber);
         });
       }, 1000);
     }, closeFirst ? 500 : 0);
@@ -901,15 +898,13 @@ del.addEventListener('mouseleave', () => { del.style.color = '#f88'; del.style.b
 
   window.RQ_bookmarks = { loadBookmarks, buildBookmarkRows };
   window._rqOpenRecord = function(bookmark) {
-    RQ.api.get_id_from_code(bookmark.module, bookmark.recordNumber)
-      .then(id => { if (id) RQ.api.open_form_tab(bookmark.module, id); });
+    RQ.api.open_record_by_number(bookmark.module, bookmark.recordNumber);
   };
 
   function initBookmarks() {
     // RW adds the form node first, then adds form_load_complete as a class once loaded —
     // so watching for class addition is more reliable than watching for node insertion.
-    on_class_added('form_load_complete', document.body, (form) => {
-      if (!form.matches('.fwform[data-controller]')) return;
+    RQ.onFormLoadComplete((form) => {
       if (form.dataset.rqSeen) return;
       form.dataset.rqSeen = '1';
       createStarButton(form);
@@ -1263,8 +1258,7 @@ del.addEventListener('mouseleave', () => { del.style.color = '#f88'; del.style.b
 
       row.addEventListener('mousedown', (e) => {
         e.preventDefault();
-        RQ.api.get_id_from_code(entry.module, entry.recordNumber)
-          .then(id => { if (id) RQ.api.open_form_tab(entry.module, id); });
+        RQ.api.open_record_by_number(entry.module, entry.recordNumber);
         document.getElementById('rq-quiknav')?.blur();
       });
 
@@ -1290,8 +1284,7 @@ del.addEventListener('mouseleave', () => { del.style.color = '#f88'; del.style.b
     // Track records when form_load_complete class is added to a form element.
     // RW adds the form node first, then adds form_load_complete as a class once loaded —
     // so watching for class addition is more reliable than watching for node insertion.
-    on_class_added('form_load_complete', document.body, (form) => {
-      if (!form.matches('.fwform[data-controller]')) return;
+    RQ.onFormLoadComplete((form) => {
       if (form.dataset.rqRecentSeen) return;
       form.dataset.rqRecentSeen = '1';
       trackRecord(form);

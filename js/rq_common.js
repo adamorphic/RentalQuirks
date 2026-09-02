@@ -158,4 +158,70 @@ let WindowDragger = function (container) {
   }
 };
 
+/**
+ * Shared watcher for RentalWorks record forms finishing their load (the
+ * 'form_load_complete' class being added to a .fwform element). Detecting this
+ * requires a subtree-wide class-attribute observer on document.body, which has a
+ * per-mutation cost across the whole app — so all features share this single
+ * lazily-created observer rather than each creating their own.
+ * @param {Function} callback receives the form Element each time a form load completes.
+ */
+RentalQuirks.onFormLoadComplete = (function () {
+    const callbacks = [];
+    let started = false;
+    return function (callback) {
+        callbacks.push(callback);
+        if (started) return;
+        started = true;
+        on_class_added('form_load_complete', document.body, (form) => {
+            if (!form.matches('.fwform[data-controller]')) return;
+            callbacks.forEach(cb => {
+                try { cb(form); }
+                catch (e) { console.error('[RQ] onFormLoadComplete callback failed', e); }
+            });
+        });
+    };
+})();
+
+/**
+ * Fetches one date-tab of the Preps Google Sheet via the gviz API and returns the
+ * parsed rows as objects keyed by column label (rows without an 'Order No.' dropped).
+ * The dashboard Preps card and both order pollers all read the same sheet on
+ * overlapping schedules, so responses are cached briefly and concurrent requests
+ * for the same tab share one fetch.
+ * @param {String} sheetId the Google Sheet document id
+ * @param {String} dateStr the sheet tab name, e.g. "2026-7-2" (no leading zeros)
+ * @returns {Promise<Object[]>} resolves to [] on any failure.
+ */
+RentalQuirks.fetchPrepsSheetRows = (function () {
+    const CACHE_TTL = 2 * 60 * 1000;
+    const cache = new Map(); // `${sheetId}|${dateStr}` → { promise, fetchedAt }
+    return function (sheetId, dateStr) {
+        const key = sheetId + '|' + dateStr;
+        const hit = cache.get(key);
+        if (hit && (Date.now() - hit.fetchedAt) < CACHE_TTL) return hit.promise;
+        // Range starts at row 2 (row 1 is the date header, row 2 is column names)
+        const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(dateStr)}&range=B2:L500&headers=1`;
+        const promise = fetch(url)
+            .then(r => r.text())
+            .then(text => {
+                const m = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]*)\);?\s*$/);
+                if (!m) return [];
+                const json = JSON.parse(m[1]);
+                if (json.status !== 'ok' || !json.table?.rows?.length) return [];
+                const cols = json.table.cols.map(c => c.label);
+                return json.table.rows
+                    .map(row => {
+                        const obj = {};
+                        row.c.forEach((cell, i) => { obj[cols[i]] = cell?.f ?? (typeof cell?.v === 'string' ? cell.v : null); });
+                        return obj;
+                    })
+                    .filter(r => r['Order No.']);
+            })
+            .catch(() => []);
+        cache.set(key, { promise, fetchedAt: Date.now() });
+        return promise;
+    };
+})();
+
 const LOG = console.log.bind(console);
