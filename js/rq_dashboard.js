@@ -3861,7 +3861,7 @@
                 hidden: ['CANCELLED', 'CLOSED'],            unavailable: 'Order module not available',          failed: 'Failed to load orders' },
     mypos:    { title: 'My POs', agentKey: MY_POS_AGENT_KEY,    controller: 'PurchaseOrderController',
                 module: 'PurchaseOrder', icon: 'shopping_cart', numberField: 'PurchaseOrderNumber',
-                listItems: fetchPurchaseOrderItems, rowFilter: hasAnyScheduleDate,
+                listItems: fetchPurchaseOrderItems, rowFilter: keepPurchaseOrderRow,
                 hidden: ['CLOSED', 'VOID'],                 unavailable: 'Purchase Order module not available', failed: 'Failed to load POs' },
     myquotes: { title: 'My Quotes', agentKey: MY_QUOTES_AGENT_KEY, controller: 'QuoteController',
                 module: 'Quote',         icon: 'request_quote', numberField: 'QuoteNumber',
@@ -3889,6 +3889,36 @@
     }
     return !!String(r.EstimatedStartDate || '').trim() ||
            !!String(r.EstimatedStopDate  || '').trim();
+  }
+
+  // Consignment POs are not things to source, so they are noise here; the card is
+  // about rental inventory. The classification field is spelled differently across
+  // grids (PurchaseOrderClassification on the sub-item grid), so try the likely
+  // names, and match on the word rather than an exact string so "CONSIGNMENT",
+  // "Consignment" or "Consignment - LA" all count.
+  //
+  // As with the date filter, an unrecognised shape keeps the row rather than
+  // hiding it, and says so once.
+  const PO_CLASS_FIELDS = ['Classification', 'PurchaseOrderClassification',
+                           'POClassification', 'ClassificationName', 'Type'];
+  let warnedNoPoClass = false;
+  function isConsignment(r) {
+    const seen = PO_CLASS_FIELDS.some(f => f in r);
+    if (!seen) {
+      if (!warnedNoPoClass) {
+        warnedNoPoClass = true;
+        console.warn('[RQ] List rows carry no classification field ' +
+                     `(looked for ${PO_CLASS_FIELDS.join(', ')}), so consignment POs ` +
+                     'cannot be hidden. Showing all.');
+      }
+      return false;
+    }
+    return /consign/i.test(String(pickField(r, PO_CLASS_FIELDS) ?? ''));
+  }
+
+  // My POs keeps a row only if it is scheduled and is not a consignment.
+  function keepPurchaseOrderRow(r) {
+    return hasAnyScheduleDate(r) && !isConsignment(r);
   }
 
   // Pre-populate detailCache from list items so sort-by-date/amount works

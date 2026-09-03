@@ -445,10 +445,53 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
 
   // My POs must actually be wired to it.
   const dashSrc3 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
-  check('My POs uses the undated filter',
-        /mypos:[\s\S]{0,700}?rowFilter: hasAnyScheduleDate/.test(dashSrc3), true);
+  // My POs composes this with the consignment filter, so assert the date check is
+  // reached rather than pinning the exact rowFilter name.
+  check('My POs row filter reaches the date check',
+        /function keepPurchaseOrderRow[\s\S]{0,300}?hasAnyScheduleDate\(r\)/.test(dashSrc3), true);
+  check('My POs is wired to a rowFilter at all',
+        /mypos:[\s\S]{0,700}?rowFilter: \w+/.test(dashSrc3), true);
   check('the filter is applied alongside the status filter',
         /!hidden\.has\(i\.Status\) && keep\(i\)/.test(dashSrc3), true);
+
+
+  // -- Hiding consignment POs -------------------------------------------------
+  console.log('consignment filter:');
+  const mkConsign = () => {
+    warned = null;
+    return new Function('console', 'pickField',
+      'let warnedNoPoClass = false;' +
+      "const PO_CLASS_FIELDS = ['Classification', 'PurchaseOrderClassification', 'POClassification', 'ClassificationName', 'Type'];" +
+      extractFn('js/rq_dashboard.js', 'isConsignment') +
+      '; return isConsignment;')({ warn: (m) => { warned = m; } }, GB.pickField);
+  };
+
+  let isCon = mkConsign();
+  check('Consignment is hidden',            isCon({ Classification: 'Consignment' }), true);
+  check('uppercase CONSIGNMENT is hidden',  isCon({ Classification: 'CONSIGNMENT' }), true);
+  check('a suffixed value still matches',   isCon({ Classification: 'CONSIGNMENT - LA' }), true);
+  check('Rental Inventory is kept',         isCon({ Classification: 'RENTAL INVENTORY' }), false);
+  check('an empty classification is kept',  isCon({ Classification: '' }), false);
+  check('the sub-item grid spelling works', isCon({ PurchaseOrderClassification: 'CONSIGNMENT' }), true);
+  check('no warning while a field exists',  warned, null);
+
+  isCon = mkConsign();
+  check('no classification field -> kept, not hidden', isCon({ PurchaseOrderNumber: 'LA1' }), false);
+  check('and it says which names it looked for', /looked for Classification/.test(warned || ''), true);
+
+  // The two PO filters must compose: scheduled AND not consignment.
+  const keepPO = new Function('hasAnyScheduleDate', 'isConsignment',
+    extractFn('js/rq_dashboard.js', 'keepPurchaseOrderRow') + '; return keepPurchaseOrderRow;');
+  const dated = r => !!(r.start), consign = r => !!(r.consign);
+  const fn = keepPO(dated, consign);
+  check('scheduled, not consignment -> kept', fn({ start: 1, consign: 0 }), true);
+  check('scheduled consignment -> hidden',    fn({ start: 1, consign: 1 }), false);
+  check('undated, not consignment -> hidden', fn({ start: 0, consign: 0 }), false);
+  check('undated consignment -> hidden',      fn({ start: 0, consign: 1 }), false);
+
+  const dashSrc4 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('My POs uses the combined filter',
+        /mypos:[\s\S]{0,700}?rowFilter: keepPurchaseOrderRow/.test(dashSrc4), true);
 
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
