@@ -268,6 +268,26 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('mapWithLimit handles an empty list', await SR.mapWithLimit([], 3, async x => x), []);
 
 
+  // -- Built-in card registries must agree -----------------------------------
+  // A card has to be listed in three places: BUILTIN_IDS, BUILTIN_BUILDERS (what
+  // constructs it) and BUILTIN_SECTION_DEFS (the "Add Section" menu). Sub Rentals
+  // shipped registered in the first two but not the third, so it existed and
+  // simply could not be added to a dashboard. These keep the three in step.
+  console.log('card registries:');
+  const dashSrc = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  const listOf = (re, inner) => [...dashSrc.match(re)[1].matchAll(inner)].map(m => m[1]).sort();
+  const ids      = listOf(/const BUILTIN_IDS\s*=\s*\[(.*?)\]/s, /'([^']+)'/g);
+  const defs     = listOf(/const BUILTIN_SECTION_DEFS = \[(.*?)\];/s, /id: '([^']+)'/g);
+  const builders = listOf(/const BUILTIN_BUILDERS = \{(.*?)\n  \};/s, /^\s*(\w+):/gm);
+
+  check('every built-in id has a builder', ids.filter(i => !builders.includes(i)), []);
+  check('every built-in id is offered in the Add Section menu', ids.filter(i => !defs.includes(i)), []);
+  check('nothing is offered that is not a built-in id', defs.filter(d => !ids.includes(d)), []);
+  check('nothing has a builder that is not a built-in id', builders.filter(b => !ids.includes(b)), []);
+  check('the new card is registered everywhere',
+        [ids, defs, builders].map(l => l.includes('subrentals')), [true, true, true]);
+
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
 })();

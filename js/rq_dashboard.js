@@ -3594,6 +3594,7 @@
     { id: 'myorders',   label: 'My Orders',      icon: 'assignment'    },
     { id: 'myquotes',   label: 'My Quotes',      icon: 'request_quote' },
     { id: 'mypos',      label: 'My POs',         icon: 'shopping_cart' },
+    { id: 'subrentals', label: 'Sub Rentals',    icon: 'inventory_2'   },
     { id: 'preps',      label: 'Preps',          icon: 'event_note'    },
   ];
 
