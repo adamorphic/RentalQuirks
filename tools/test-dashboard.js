@@ -494,6 +494,44 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         /mypos:[\s\S]{0,700}?rowFilter: keepPurchaseOrderRow/.test(dashSrc4), true);
 
 
+  // -- Row labelling ----------------------------------------------------------
+  // Orders and quotes lead with the job description; a PO leads with the vendor,
+  // and whichever label loses the top line must reappear on the second, never be
+  // dropped.
+  console.log('row labels:');
+  const RL = new Function(
+    extractFn('js/rq_dashboard.js', 'defaultRowLabels') +
+    extractFn('js/rq_dashboard.js', 'purchaseOrderRowLabels') +
+    '; return { defaultRowLabels, purchaseOrderRowLabels };')();
+
+  const po = { Description: 'BURGER KING', Vendor: 'MEDIA BOX INC', PurchaseOrderNumber: 'LA19992' };
+  check('default leads with the description',
+        RL.defaultRowLabels(po, 'PurchaseOrderNumber').primary, 'BURGER KING');
+  check('default puts the vendor underneath',
+        RL.defaultRowLabels(po, 'PurchaseOrderNumber').sub, 'MEDIA BOX INC');
+  check('My POs leads with the vendor',
+        RL.purchaseOrderRowLabels(po, 'PurchaseOrderNumber').primary, 'MEDIA BOX INC');
+  check('My POs puts the description underneath',
+        RL.purchaseOrderRowLabels(po, 'PurchaseOrderNumber').sub, 'BURGER KING');
+
+  const noVendor = { Description: 'BURGER KING', PurchaseOrderNumber: 'LA19992' };
+  check('no vendor falls back to the description on top',
+        RL.purchaseOrderRowLabels(noVendor, 'PurchaseOrderNumber').primary, 'BURGER KING');
+  const bare = { PurchaseOrderNumber: 'LA19992' };
+  check('nothing but a number still labels the row',
+        RL.purchaseOrderRowLabels(bare, 'PurchaseOrderNumber').primary, 'LA19992');
+  check('and leaves the second line empty',
+        RL.purchaseOrderRowLabels(bare, 'PurchaseOrderNumber').sub, null);
+  check('default falls back to the customer when there is no vendor',
+        RL.defaultRowLabels({ Description: 'D', Customer: 'ACME' }, 'X').sub, 'ACME');
+
+  const dashSrc5 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('My POs is wired to the vendor-first labels',
+        /mypos:[\s\S]{0,800}?rowLabels: purchaseOrderRowLabels/.test(dashSrc5), true);
+  check('the sub label reaches the row meta',
+        /vendor: sub, customer: null/.test(dashSrc5), true);
+
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
 })();

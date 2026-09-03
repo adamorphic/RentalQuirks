@@ -3862,6 +3862,7 @@
     mypos:    { title: 'My POs', agentKey: MY_POS_AGENT_KEY,    controller: 'PurchaseOrderController',
                 module: 'PurchaseOrder', icon: 'shopping_cart', numberField: 'PurchaseOrderNumber',
                 listItems: fetchPurchaseOrderItems, rowFilter: keepPurchaseOrderRow,
+                rowLabels: purchaseOrderRowLabels,
                 hidden: ['CLOSED', 'VOID'],                 unavailable: 'Purchase Order module not available', failed: 'Failed to load POs' },
     myquotes: { title: 'My Quotes', agentKey: MY_QUOTES_AGENT_KEY, controller: 'QuoteController',
                 module: 'Quote',         icon: 'request_quote', numberField: 'QuoteNumber',
@@ -3889,6 +3890,24 @@
     }
     return !!String(r.EstimatedStartDate || '').trim() ||
            !!String(r.EstimatedStopDate  || '').trim();
+  }
+
+  // What leads a row, and what sits beside the record number underneath it.
+  // Orders and quotes are recognised by their job description; a PO is recognised
+  // by who it is with, so My POs leads with the vendor and drops the description
+  // to the second line.
+  function defaultRowLabels(item, numberField) {
+    return {
+      primary: item.Description || item[numberField],
+      sub:     item.Vendor || item.Customer || item.CustomerName || null,
+    };
+  }
+
+  function purchaseOrderRowLabels(item, numberField) {
+    return {
+      primary: item.Vendor || item.Description || item[numberField],
+      sub:     item.Description || null,
+    };
   }
 
   // Consignment POs are not things to source, so they are noise here; the card is
@@ -4005,13 +4024,18 @@
     const idField = RQ.api.module_identifier_names(module)?.id;
 
     // Build lightweight item descriptors for sorting
-    const sortable = apiItems.map(item => ({
-      primary:      item.Description || item[numberField],
-      secondary:    item[numberField],
-      module,
-      recordNumber: item[numberField],
-      _raw:         item,
-    }));
+    const labelsFor = AGENT_SECTIONS[cardId]?.rowLabels ?? defaultRowLabels;
+    const sortable = apiItems.map(item => {
+      const labels = labelsFor(item, numberField);
+      return {
+        primary:      labels.primary,
+        secondary:    item[numberField],
+        sub:          labels.sub,
+        module,
+        recordNumber: item[numberField],
+        _raw:         item,
+      };
+    });
 
     const itemFetcher = AGENT_SECTIONS[cardId]?.listItems ?? null;
     const itemTargets = [];
@@ -4020,7 +4044,7 @@
     if (sort) sortItemsInPlace(sortable, sort.field, sort.dir);
 
     sortable.forEach((desc, idx) => {
-      const { primary, secondary, recordNumber, _raw } = desc;
+      const { primary, secondary, sub, recordNumber, _raw } = desc;
       const metaEntry = getItemMetaEntry(module, recordNumber);
       const tags = metaEntry.tags || [];
       const notes = metaEntry.notes || '';
@@ -4028,7 +4052,9 @@
       const row = draggableCardRow(
         icon, primary, secondary,
         () => { if (idField && _raw[idField]) RQ.api.open_form_tab(module, _raw[idField]); },
-        { icon, primary, secondary, module, recordNumber, cardId, tags, notes, vendor: _raw.Vendor || null, customer: _raw.Customer || _raw.CustomerName || null },
+        // draggableCardRow shows meta.vendor ?? meta.customer beside the record
+        // number; whichever label did not take the top line goes there.
+        { icon, primary, secondary, module, recordNumber, cardId, tags, notes, vendor: sub, customer: null },
         null // no archive for agent-driven sections
       );
       row.dataset.rowIndex = idx;
