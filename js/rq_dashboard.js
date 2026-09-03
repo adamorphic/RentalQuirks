@@ -3861,13 +3861,35 @@
                 hidden: ['CANCELLED', 'CLOSED'],            unavailable: 'Order module not available',          failed: 'Failed to load orders' },
     mypos:    { title: 'My POs', agentKey: MY_POS_AGENT_KEY,    controller: 'PurchaseOrderController',
                 module: 'PurchaseOrder', icon: 'shopping_cart', numberField: 'PurchaseOrderNumber',
-                listItems: fetchPurchaseOrderItems,
+                listItems: fetchPurchaseOrderItems, rowFilter: hasAnyScheduleDate,
                 hidden: ['CLOSED', 'VOID'],                 unavailable: 'Purchase Order module not available', failed: 'Failed to load POs' },
     myquotes: { title: 'My Quotes', agentKey: MY_QUOTES_AGENT_KEY, controller: 'QuoteController',
                 module: 'Quote',         icon: 'request_quote', numberField: 'QuoteNumber',
                 hidden: ['CANCELLED', 'CLOSED', 'ORDERED'], unavailable: 'Quote module not available',          failed: 'Failed to load quotes',
                 buildExtras: addQuotesDueToggle },
   };
+
+  // Hides records with neither an estimated start nor stop date. A PO with just
+  // one of the two is still scheduled, so it stays - only the entirely undated
+  // ones are noise on a card about what is coming up.
+  //
+  // The list response may not carry these fields at all; the Est. Start/Stop sort
+  // options fetch per-record detail for exactly that reason. When the fields are
+  // absent rather than empty this keeps every row and says so once, because
+  // hiding everything would be far worse than hiding nothing.
+  let warnedNoScheduleDates = false;
+  function hasAnyScheduleDate(r) {
+    if (!('EstimatedStartDate' in r) && !('EstimatedStopDate' in r)) {
+      if (!warnedNoScheduleDates) {
+        warnedNoScheduleDates = true;
+        console.warn('[RQ] List rows carry no EstimatedStartDate/EstimatedStopDate, ' +
+                     'so undated records cannot be hidden without a fetch per row. Showing all.');
+      }
+      return true;
+    }
+    return !!String(r.EstimatedStartDate || '').trim() ||
+           !!String(r.EstimatedStopDate  || '').trim();
+  }
 
   // Pre-populate detailCache from list items so sort-by-date/amount works
   // immediately and an open detail row picks up the latest Status without a refetch.
@@ -3923,7 +3945,8 @@
       .then(r => r.json())
       .then(r => {
         const hidden = new Set(cfg.hidden);
-        const items = (r?.Items ?? []).filter(i => !hidden.has(i.Status));
+        const keep = cfg.rowFilter ?? (() => true);
+        const items = (r?.Items ?? []).filter(i => !hidden.has(i.Status) && keep(i));
         prePopulateDetailCache(cfg, items);
         setCachedSection(cardId, { items, fetchedAt: Date.now() });
         renderBuiltinRows(cardId, items, cfg.module, cfg.icon);

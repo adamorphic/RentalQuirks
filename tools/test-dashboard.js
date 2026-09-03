@@ -405,6 +405,52 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         /ITEM_QTY_FIELDS\s*=\s*\[[^\]]*'SubQuantity'/.test(dashSrc2), true);
 
 
+  // -- Hiding undated records -------------------------------------------------
+  // "Missing both" is the rule: one date is enough to keep a record. The absent-
+  // field case matters most - if the list response omits these columns entirely,
+  // filtering must be skipped rather than dropping every row.
+  console.log('undated filter:');
+  let warned = null;
+  // Rebuilt per case so the once-only warning flag starts fresh each time.
+  const mkFilter = () => {
+    warned = null;
+    const fn = new Function('console', 'let warnedNoScheduleDates = false;' +
+      extractFn('js/rq_dashboard.js', 'hasAnyScheduleDate') +
+      '; return hasAnyScheduleDate;')({ warn: (m) => { warned = m; } });
+    return fn;
+  };
+
+  let keep = mkFilter();
+  check('both dates present -> kept',
+        keep({ EstimatedStartDate: '2026-09-04', EstimatedStopDate: '2026-09-18' }), true);
+  check('start only -> kept',
+        keep({ EstimatedStartDate: '2026-09-04', EstimatedStopDate: '' }), true);
+  check('stop only -> kept',
+        keep({ EstimatedStartDate: '', EstimatedStopDate: '2026-09-18' }), true);
+  check('both empty -> hidden',
+        keep({ EstimatedStartDate: '', EstimatedStopDate: '' }), false);
+  check('both whitespace -> hidden',
+        keep({ EstimatedStartDate: '  ', EstimatedStopDate: '  ' }), false);
+  check('both null -> hidden',
+        keep({ EstimatedStartDate: null, EstimatedStopDate: null }), false);
+  check('no warning while the fields exist', warned, null);
+
+  keep = mkFilter();
+  check('fields absent entirely -> kept, not dropped', keep({ PurchaseOrderNumber: 'LA1' }), true);
+  check('and it says so', /cannot be hidden without a fetch per row/.test(warned || ''), true);
+
+  keep = mkFilter();
+  keep({ A: 1 }); const first = warned; warned = null; keep({ B: 2 });
+  check('the warning fires only once', [first !== null, warned], [true, null]);
+
+  // My POs must actually be wired to it.
+  const dashSrc3 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('My POs uses the undated filter',
+        /mypos:[\s\S]{0,700}?rowFilter: hasAnyScheduleDate/.test(dashSrc3), true);
+  check('the filter is applied alongside the status filter',
+        /!hidden\.has\(i\.Status\) && keep\(i\)/.test(dashSrc3), true);
+
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
 })();
