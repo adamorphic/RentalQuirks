@@ -10,7 +10,7 @@
   const ARCHIVE_KEY         = 'rq-dashboard-archive';
   const TABS_KEY            = 'rq-dashboard-tabs';
   const ACTIVE_TAB_KEY      = 'rq-dashboard-active-tab';
-  const BUILTIN_IDS         = ['quicklinks', 'bookmarks', 'recents', 'archive', 'myorders', 'myquotes', 'mypos', 'preps'];
+  const BUILTIN_IDS         = ['quicklinks', 'bookmarks', 'recents', 'archive', 'myorders', 'myquotes', 'mypos', 'subrentals', 'preps'];
   const MY_ORDERS_AGENT_KEY = 'rq-dashboard-my-orders-agent';
   const MY_QUOTES_AGENT_KEY   = 'rq-dashboard-my-quotes-agent';
   const MY_QUOTES_DUE_KEY     = 'rq-dashboard-my-quotes-due-field'; // 'start' | 'stop'
@@ -3519,6 +3519,7 @@
     myorders:   () => buildAgentCard('myorders'),
     myquotes:   () => buildAgentCard('myquotes'),
     mypos:      () => buildAgentCard('mypos'),
+    subrentals: () => buildSubRentalsCard(),
     preps:      () => buildPrepsCard(),
   };
 
@@ -3703,6 +3704,7 @@
     if (visibleIds.has('myorders'))   loadMyOrders();
     if (visibleIds.has('myquotes'))   loadMyQuotes();
     if (visibleIds.has('mypos'))      loadMyPOs();
+    if (visibleIds.has('subrentals')) loadSubRentals();
     if (visibleIds.has('preps'))      loadPreps();
     loadCustomSections()
       .filter(s => visibleIds.has(s.id))
@@ -3979,6 +3981,264 @@
   function loadMyOrders(forceRefresh = false) { loadAgentSection('myorders', forceRefresh); }
 
   function loadMyQuotes(forceRefresh = false) { loadAgentSection('myquotes', forceRefresh); }
+
+  // ── Sub Rentals card ──────────────────────────────────────────────
+  // Sub-rental lines still waiting to be sourced, across orders picking soon,
+  // so they can be chased before the pick date arrives.
+  //
+  // Two round trips are unavoidable. A sub-item row carries its order's number,
+  // agent, customer and estimated dates - but not PickDate - so the orders in the
+  // window must be found first, then each one's sub-items fetched. RW's
+  // ordersubitem endpoint is a grid /browse: it rejects GET, wants the order in
+  // miscfields/uniqueids, and answers columnar (ColumnIndex + Rows-of-arrays)
+  // rather than the { Items: [...] } shape the rest of this file expects.
+  const SUBRENTAL_DAYS_KEY    = 'rq-dashboard-subrental-days';
+  const SUBRENTAL_TTL         = 10 * 60 * 1000;
+  const SUBRENTAL_CONCURRENCY = 5;  // ~24 orders in a 3-week window; keep the UI responsive
+  const SUBRENTAL_SKIP_STATUS = new Set(['CANCELLED', 'CLOSED', 'VOID']);
+
+  function subRentalDays() {
+    const n = parseInt(localStorage.getItem(SUBRENTAL_DAYS_KEY), 10);
+    return Number.isFinite(n) && n > 0 ? n : 21;
+  }
+
+  function rwHeaders() {
+    return { authorization: 'Bearer ' + sessionStorage.apiToken,
+             'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' };
+  }
+
+  // RW grid endpoints answer with ColumnIndex (field -> position) and Rows of
+  // positional arrays. Turn that back into plain objects.
+  function decodeGridRows(json) {
+    const idx = json?.ColumnIndex;
+    if (!idx || !Array.isArray(json.Rows)) return [];
+    const names = Object.keys(idx);
+    return json.Rows.map(row => {
+      const o = {};
+      for (const n of names) o[n] = row[idx[n]];
+      return o;
+    });
+  }
+
+  function fetchOrderSubItems(orderId) {
+    const body = {
+      activeview: '', boundids: {}, clientVersion: window.applicationConfig?.clientVersion ?? '',
+      fields: [], filterfields: {},
+      miscfields: { OrderId: { datafield: 'OrderId', value: orderId } },
+      module: 'OrderSubItemGrid', options: {}, orderby: 'ItemOrder asc', orderbydirection: '',
+      pageno: 1, pagesize: 500,
+      requestid: (crypto?.randomUUID?.() ?? String(Date.now()) + Math.random()),
+      searchcondition: [], searchconjunctions: [], searchfieldoperators: [], searchfields: [],
+      searchfieldtypes: [], searchfieldvalues: [], searchgroupings: [], searchseparators: [],
+      timezoneOffset: -new Date().getTimezoneOffset() / 60,
+      top: 0, totalfields: [],
+      uniqueids: { OrderId: orderId, RecType: 'R' },
+    };
+    return fetch(RW_URL + 'api/v1/ordersubitem/browse',
+                 { method: 'POST', headers: rwHeaders(), body: JSON.stringify(body) })
+      .then(r => (r.ok ? r.json() : null))
+      .then(decodeGridRows)
+      .catch(() => []);
+  }
+
+  // Sourcing attaches both a vendor and a sub-PO, so a line missing either is not
+  // finished. Treating "either missing" as outstanding also surfaces half-done
+  // lines - a vendor picked but no PO raised - which are exactly worth chasing.
+  function subItemNeedsSourcing(r) {
+    return !String(r.Vendor || '').trim() || !String(r.PurchaseOrderNumber || '').trim();
+  }
+
+  // Runs fn over items with at most `limit` in flight, preserving order.
+  async function mapWithLimit(items, limit, fn) {
+    const out = new Array(items.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const i = next++;
+        out[i] = await fn(items[i], i);
+      }
+    }));
+    return out;
+  }
+
+  async function loadSubRentals(forceRefresh = false) {
+    const body = document.getElementById('rq-card-body-subrentals');
+    if (!body) return;
+
+    const cached = getCachedSection('subrentals');
+    const fresh  = cached && (Date.now() - cached.fetchedAt) < SUBRENTAL_TTL;
+    if (cached && !body.querySelector('.rq-subrental-order')) renderSubRentals(cached.groups);
+    if (!forceRefresh && fresh) return;
+    if (!cached) body.innerHTML = placeholderHTML('Loading…');
+
+    const controller = window.OrderController;
+    if (!controller?.apiurl) {
+      if (!cached) body.innerHTML = placeholderHTML('Order module not available');
+      return;
+    }
+
+    const from = new Date(); from.setHours(0, 0, 0, 0);
+    const to = new Date(from); to.setDate(to.getDate() + subRentalDays());
+    const ymd = d => d.toLocaleDateString('en-CA'); // local YYYY-MM-DD, not UTC
+    const filter = encodeURIComponent(JSON.stringify([
+      { Field: 'PickDate', Op: '>=', Value: ymd(from) },
+      { Field: 'PickDate', Op: '<=', Value: ymd(to)   },
+    ]));
+
+    try {
+      const res = await fetch(RW_URL + controller.apiurl + '?pagesize=200&filter=' + filter,
+                              { headers: rwHeaders() });
+      if (!res.ok) throw new Error('orders ' + res.status);
+      const orders = ((await res.json()).Items ?? [])
+        .filter(o => !SUBRENTAL_SKIP_STATUS.has(String(o.Status || '').toUpperCase()));
+
+      const perOrder = await mapWithLimit(orders, SUBRENTAL_CONCURRENCY, async (o) => ({
+        order: o,
+        items: (await fetchOrderSubItems(o.OrderId)).filter(subItemNeedsSourcing),
+      }));
+
+      const groups = groupSubRentalsByPickDate(perOrder.filter(g => g.items.length));
+      setCachedSection('subrentals', { groups, fetchedAt: Date.now() });
+      renderSubRentals(groups);
+    } catch {
+      // Leave stale data visible on a background refresh; only a cold card shows the error.
+      if (!cached) body.innerHTML = placeholderHTML('Failed to load sub rentals');
+    }
+  }
+
+  function groupSubRentalsByPickDate(entries) {
+    const byDate = new Map();
+    for (const e of entries) {
+      const key = String(e.order.PickDate || '').slice(0, 10) || 'nodate';
+      if (!byDate.has(key)) byDate.set(key, []);
+      byDate.get(key).push(e);
+    }
+    return [...byDate.entries()]
+      .sort((a, b) => (a[0] === 'nodate') - (b[0] === 'nodate') || a[0].localeCompare(b[0]))
+      .map(([dateStr, list]) => ({
+        dateStr,
+        entries: list.sort((a, b) => String(a.order.OrderNumber).localeCompare(String(b.order.OrderNumber))),
+      }));
+  }
+
+  function renderSubRentals(groups) {
+    const body = document.getElementById('rq-card-body-subrentals');
+    if (!body) return;
+    body.innerHTML = '';
+
+    if (!groups || !groups.length) {
+      body.innerHTML = placeholderHTML('Nothing waiting to be sourced');
+      return;
+    }
+
+    const todayStr = new Date().toLocaleDateString('en-CA');
+    groups.forEach((g, gi) => {
+      const isToday = g.dateStr === todayStr;
+      const overdue = g.dateStr !== 'nodate' && g.dateStr < todayStr;
+      const label = g.dateStr === 'nodate' ? 'No pick date'
+        : isToday ? 'Today'
+        : new Date(g.dateStr + 'T00:00:00').toLocaleDateString('en-US',
+            { weekday: 'long', month: 'long', day: 'numeric' });
+
+      body.appendChild(el('div', `
+        padding: 5px 14px 3px;
+        font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+        color: ${overdue ? '#e05555' : isToday ? '#5a9a5a' : '#666'};
+        ${gi > 0 ? 'border-top: 1px solid #222;' : ''}
+      `, label));
+
+      g.entries.forEach(({ order, items }) => body.appendChild(buildSubRentalOrderBlock(order, items)));
+    });
+  }
+
+  function buildSubRentalOrderBlock(order, items) {
+    const wrap = el('div', 'padding: 3px 14px 7px;');
+    wrap.className = 'rq-subrental-order';
+
+    const head = el('div', 'display: flex; align-items: baseline; gap: 7px; cursor: pointer;');
+    head.appendChild(el('span', 'font-size: 12px; font-weight: 600; color: #ccc; flex-shrink: 0;',
+                        order.OrderNumber || ''));
+    head.appendChild(el('span', `
+      font-size: 12px; color: #999; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; flex: 1 1 auto;`, order.Description || ''));
+    if (order.Agent) {
+      head.appendChild(el('span', 'font-size: 10px; color: #6a8a9a; flex-shrink: 0;', order.Agent));
+    }
+    head.addEventListener('mouseenter', () => { head.style.opacity = '0.8'; });
+    head.addEventListener('mouseleave', () => { head.style.opacity = ''; });
+    head.addEventListener('click', () => {
+      if (order.OrderId) RQ.api.open_form_tab('Order', order.OrderId);
+      else if (order.OrderNumber) RQ.api.open_record_by_number('Order', order.OrderNumber);
+    });
+    wrap.appendChild(head);
+
+    items.forEach(it => {
+      const line = el('div', `
+        display: flex; gap: 8px; align-items: baseline;
+        padding-left: 12px; margin-top: 2px; font-size: 11px; color: #888;`);
+      line.appendChild(el('span', 'color: #7a9aba; flex-shrink: 0; min-width: 62px;', it.ICode || ''));
+      line.appendChild(el('span', `
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto;`,
+        it.Description || ''));
+      const qty = Number(it.SubQuantity);
+      if (Number.isFinite(qty) && qty) {
+        line.appendChild(el('span', 'color: #666; flex-shrink: 0;',
+                            '×' + (qty % 1 ? qty : qty.toFixed(0))));
+      }
+      // A vendor with no PO is half-sourced; say so rather than showing it as untouched.
+      if (String(it.Vendor || '').trim()) {
+        line.appendChild(el('span', 'color: #7a6a4a; flex-shrink: 0;',
+                            it.Vendor + ' · no PO'));
+      }
+      wrap.appendChild(line);
+    });
+
+    return wrap;
+  }
+
+  function buildSubRentalsCard() {
+    const card = buildCard('Sub Rentals', 'inventory_2', 'subrentals');
+
+    const daysInput = document.createElement('input');
+    daysInput.type = 'text';
+    daysInput.placeholder = 'Days ahead…';
+    daysInput.value = String(subRentalDays());
+    daysInput.style.cssText = CFG_INPUT_CSS;
+    daysInput.addEventListener('click', e => e.stopPropagation());
+    daysInput.addEventListener('dragstart', e => e.stopPropagation());
+
+    const applyBtn = el('button', CFG_APPLY_BTN_CSS, 'Apply');
+    applyBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const n = parseInt(daysInput.value.trim(), 10);
+      if (Number.isFinite(n) && n > 0) localStorage.setItem(SUBRENTAL_DAYS_KEY, String(n));
+      else localStorage.removeItem(SUBRENTAL_DAYS_KEY);
+      daysInput.value = String(subRentalDays());
+      clearCachedSection('subrentals');
+      loadSubRentals(true);
+    });
+    daysInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') applyBtn.click();
+      e.stopPropagation();
+    });
+
+    const refreshBtn = makeIconButton('refresh', {
+      title: 'Refresh',
+      onClick: () => { clearCachedSection('subrentals'); loadSubRentals(true); },
+    });
+
+    card._badgeToggleBtn?.remove(); // no per-row due badges on this card
+
+    const inputWrap = el('div', '');
+    inputWrap.className = 'rq-cfg-input-wrap';
+    inputWrap.appendChild(daysInput);
+    const frag = document.createDocumentFragment();
+    frag.append(inputWrap, applyBtn);
+    card._cfgBar.insertBefore(frag, card._cfgBar.firstChild);
+
+    card._collapseBtn.insertAdjacentElement('beforebegin', refreshBtn);
+    return card;
+  }
 
   // ── Preps card (Google Sheets daily prep schedule) ─────────────────
 

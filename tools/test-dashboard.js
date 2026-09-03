@@ -75,7 +75,8 @@ function loadSandbox({ localStorage, fetchImpl, now }) {
 // the shipped implementation rather than a copy that can drift from it.
 function extractFn(file, name) {
   const src = fs.readFileSync(file, 'utf8');
-  const start = src.indexOf(`  function ${name}(`);
+  let start = src.indexOf(`  function ${name}(`);
+  if (start === -1) start = src.indexOf(`  async function ${name}(`);
   if (start === -1) throw new Error(`${name} not found in ${file}`);
   let i = src.indexOf('{', start), depth = 0;
   for (; i < src.length; i++) {
@@ -212,6 +213,60 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   // comment must not be enough to satisfy the check.
   check('list stubs are stored stale so a real fetch still happens',
         writes.some(w => /fetchedAt:\s*0\b/.test(w)), true);
+
+  // -- Sub Rentals card logic, lifted from rq_dashboard.js -----------------
+  console.log('sub rentals:');
+  const SR = new Function(
+    extractFn('js/rq_dashboard.js', 'decodeGridRows') +
+    extractFn('js/rq_dashboard.js', 'subItemNeedsSourcing') +
+    extractFn('js/rq_dashboard.js', 'groupSubRentalsByPickDate') +
+    extractFn('js/rq_dashboard.js', 'mapWithLimit') +
+    '; return { decodeGridRows, subItemNeedsSourcing, groupSubRentalsByPickDate, mapWithLimit };')();
+
+  // RW grid endpoints answer columnar: ColumnIndex maps field -> position.
+  check('decodes columnar grid rows',
+        SR.decodeGridRows({ ColumnIndex: { OrderNumber: 0, ICode: 1, Vendor: 2 },
+                            Rows: [['LA1', 'FX3', 'MEDIA BOX'], ['LA1', 'LENS', '']] }),
+        [{ OrderNumber: 'LA1', ICode: 'FX3', Vendor: 'MEDIA BOX' },
+         { OrderNumber: 'LA1', ICode: 'LENS', Vendor: '' }]);
+  check('null response decodes to []', SR.decodeGridRows(null), []);
+  check('response without Rows decodes to []', SR.decodeGridRows({ ColumnIndex: { A: 0 } }), []);
+
+  // Sourcing attaches a vendor AND a sub-PO; anything short of both still needs chasing.
+  check('vendor + PO counts as sourced',
+        SR.subItemNeedsSourcing({ Vendor: 'MEDIA BOX', PurchaseOrderNumber: 'LA19992' }), false);
+  check('neither vendor nor PO needs sourcing',
+        SR.subItemNeedsSourcing({ Vendor: '', PurchaseOrderNumber: '' }), true);
+  check('vendor but no PO still needs sourcing',
+        SR.subItemNeedsSourcing({ Vendor: 'MEDIA BOX', PurchaseOrderNumber: '' }), true);
+  check('whitespace counts as empty',
+        SR.subItemNeedsSourcing({ Vendor: '  ', PurchaseOrderNumber: '  ' }), true);
+  check('absent fields need sourcing', SR.subItemNeedsSourcing({}), true);
+
+  const grouped = SR.groupSubRentalsByPickDate([
+    { order: { OrderNumber: 'B', PickDate: '2026-09-10' }, items: [1] },
+    { order: { OrderNumber: 'A', PickDate: '2026-09-04' }, items: [1] },
+    { order: { OrderNumber: 'C', PickDate: '2026-09-04' }, items: [1] },
+    { order: { OrderNumber: 'D', PickDate: '' },           items: [1] },
+  ]);
+  check('groups sort by pick date, undated last',
+        grouped.map(g => g.dateStr), ['2026-09-04', '2026-09-10', 'nodate']);
+  check('orders within a day sort by number',
+        grouped[0].entries.map(e => e.order.OrderNumber), ['A', 'C']);
+  check('a datetime pick date is trimmed to the day',
+        SR.groupSubRentalsByPickDate([{ order: { OrderNumber: 'A', PickDate: '2026-09-04T00:00:00Z' }, items: [1] }])[0].dateStr,
+        '2026-09-04');
+
+  let inflight = 0, peak = 0;
+  const mapped = await SR.mapWithLimit([1,2,3,4,5,6,7,8,9,10], 3, async n => {
+    inflight++; peak = Math.max(peak, inflight);
+    await new Promise(r => setTimeout(r, 5));
+    inflight--; return n * 2;
+  });
+  check('mapWithLimit preserves input order', mapped, [2,4,6,8,10,12,14,16,18,20]);
+  check('mapWithLimit never exceeds the cap', peak <= 3, true);
+  check('mapWithLimit handles an empty list', await SR.mapWithLimit([], 3, async x => x), []);
+
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
