@@ -172,7 +172,11 @@
   }
 
   // ── Record detail fetch & render ───────────────────────────────────
-  const detailCache = new Map(); // key → { data, fetchedAt }
+  // key -> { data: {module, record, items, avail}, fetchedAt }. Entries pre-populated
+  // from a list response use fetchedAt: 0 - same shape, but falsy, so they read as
+  // stale (a real fetch still happens) and callers can tell a list stub from a full
+  // record with a truthiness check instead of probing two different shapes.
+  const detailCache = new Map();
   const DETAIL_TTL  = 3 * 60 * 1000; // 3 minutes
   // Cache for agent-filtered sections: key → { items: [], fetchedAt: timestamp }
   const agentSectionCache = new Map();
@@ -1137,7 +1141,7 @@
     }
 
     const cached = detailCache.get(module + ':' + rn);
-    const record = cached?.data?.record ?? cached?.record;
+    const record = cached?.data?.record;
     if (record) {
       render(record.Status ?? record.OrderStatus);
     } else {
@@ -1207,13 +1211,11 @@
     let stopDateStr = null;
     const key = module + ':' + recordNumber;
     const cached = detailCache.get(key);
-    if (cached?.fetchedAt !== undefined) {
-      // Full detail available from a prior fetchRecordDetail call
-      stopDateStr = cached.data?.record?.[dateField];
-      applyBadge(stopDateStr);
-    } else if (cached?.record?.[dateField] !== undefined) {
-      // Pre-populated list item that happens to include the date field
-      stopDateStr = cached.record[dateField];
+    const cachedRecord = cached?.data?.record;
+    if (cached?.fetchedAt || cachedRecord?.[dateField] !== undefined) {
+      // A full record (trusted even if the field is absent), or a list stub that
+      // happens to carry the date already.
+      stopDateStr = cachedRecord?.[dateField];
       applyBadge(stopDateStr);
     } else {
       // No cache or pre-populated list item lacks the date field — fetch full detail
@@ -2555,7 +2557,7 @@
         if (field === 'primary')   return (item.primary   || '').toLowerCase();
         if (field === 'secondary') return (item.secondary || '').toLowerCase();
         const detail = detailCache.get(item.module + ':' + item.recordNumber);
-        const r = detail?.data?.record ?? detail?.record;
+        const r = detail?.data?.record;
         if (field === 'estStart') return r?.EstimatedStartDate ? new Date(r.EstimatedStartDate) : null;
         if (field === 'estStop')  return r?.EstimatedStopDate  ? new Date(r.EstimatedStopDate)  : null;
         if (field === 'amount')   return r?.GrandTotal ?? r?.Total ?? r?.OrderTotal ?? null;
@@ -2867,9 +2869,9 @@
     };
 
     const cached = detailCache.get(module + ':' + recordNumber);
-    if (cached?.fetchedAt !== undefined) apply(cached.data?.record);
-    else if (cached?.record?.EstimatedStopDate !== undefined ||
-             cached?.record?.EstimatedStartDate !== undefined) apply(cached.record);
+    const cachedRecord = cached?.data?.record;
+    if (cached?.fetchedAt || cachedRecord?.EstimatedStopDate !== undefined
+                          || cachedRecord?.EstimatedStartDate !== undefined) apply(cachedRecord);
     else fetchRecordDetail(module, recordNumber).then(d => apply(d?.record)).catch(() => {});
 
     container.appendChild(span);
@@ -3870,7 +3872,7 @@
       const key = cfg.module + ':' + item[cfg.numberField];
       const _ex = detailCache.get(key);
       if (_ex?.data?.record) _ex.data.record.Status = item.Status ?? _ex.data.record.Status;
-      else detailCache.set(key, { record: item });
+      else detailCache.set(key, { data: { module: cfg.module, record: item, items: [], avail: null }, fetchedAt: 0 });
     });
   }
 

@@ -1,0 +1,218 @@
+// tools/test-dashboard.js
+// Smoke tests for the pure logic behind the dashboard. No dependencies, no test
+// runner: it loads the real source files and exercises them, so it verifies what
+// ships rather than a retyped copy.
+//
+//   node tools/test-dashboard.js
+//
+// There is no node on PATH on the dev machine; a copy lives at
+//   C:\Users\aagostino\Downloads\nodejs\node-v24.14.1-win-x64\node.exe
+//
+// Scope: rq_common.js and rq_sheets.js run in a sandbox that mimics the real load
+// order. rq_dashboard.js is a ~5000-line IIFE needing far too much DOM to load, so
+// its pure helpers are extracted by name and its cache invariants are checked
+// structurally. Nothing here touches RentalWorks or Google.
+
+const fs = require('fs');
+const vm = require('vm');
+const path = require('path');
+
+process.chdir(path.join(__dirname, '..'));
+
+let failures = 0;
+function check(label, actual, expected) {
+  const a = JSON.stringify(actual), e = JSON.stringify(expected);
+  if (a === e) console.log(`  PASS  ${label}`);
+  else { console.log(`  FAIL  ${label}\n        expected ${e}\n        actual   ${a}`); failures++; }
+}
+
+function storageProxy(initial = {}) {
+  const store = { ...initial };
+  return new Proxy(store, {
+    get(t, p) {
+      if (p === 'getItem')    return k => (k in t ? t[k] : null);
+      if (p === 'setItem')    return (k, v) => { t[k] = String(v); };
+      if (p === 'removeItem') return k => { delete t[k]; };
+      if (p === '_dump')      return () => ({ ...t });
+      return t[p];
+    },
+  });
+}
+
+// script_execution_mgr.js loads first in the real userscript and supplies these.
+// `window` is aliased to the global so bare `RentalQuirks` and `window.RentalQuirks`
+// are one object, exactly as in a browser.
+function loadSandbox({ localStorage, fetchImpl, now }) {
+  const sandbox = {
+    RentalQuirks: {},
+    on_class_added: () => {},
+    location: { pathname: '/', origin: 'https://example.rentalworks.cloud' },
+    localStorage,
+    navigator: {},
+    document: { documentElement: {}, body: {}, createElement: () => ({ style: {} }) },
+    fetch: fetchImpl,
+    console: { log() {}, warn() {}, error() {} },
+    setTimeout,
+    Promise, Set, Map, JSON, Object, Array, Error, String, Number, RegExp,
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.window = sandbox;
+  const RealDate = Date;
+  const clock = { t: now };
+  sandbox.__clock = clock;
+  sandbox.Date = now === undefined ? Date : class extends RealDate {
+    constructor(...a) { super(...(a.length ? a : [clock.t])); }
+    static now() { return clock.t; }
+  };
+  vm.createContext(sandbox);
+  for (const f of ['js/rq_common.js', 'js/rq_sheets.js']) {
+    vm.runInContext(fs.readFileSync(f, 'utf8'), sandbox, { filename: f });
+  }
+  return sandbox;
+}
+
+// Lifts a named function out of a source file by walking braces, so the test runs
+// the shipped implementation rather than a copy that can drift from it.
+function extractFn(file, name) {
+  const src = fs.readFileSync(file, 'utf8');
+  const start = src.indexOf(`  function ${name}(`);
+  if (start === -1) throw new Error(`${name} not found in ${file}`);
+  let i = src.indexOf('{', start), depth = 0;
+  for (; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(start, i + 1); }
+  }
+  throw new Error(`unterminated ${name}`);
+}
+
+function gviz(rows, cols) {
+  return `/*O_o*/\ngoogle.visualization.Query.setResponse({"status":"ok","table":{"cols":${
+    JSON.stringify(cols.map(l => ({ label: l })))},"rows":${
+    JSON.stringify(rows.map(r => ({ c: r.map(v => (v === null ? null : { v })) })))}}});`;
+}
+
+const COLS = ['Order No.', 'Prep Tech', 'Prep Location'];
+const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary going back
+
+// -- Module surface --------------------------------------------------------
+{
+  const sb = loadSandbox({ localStorage: storageProxy(), fetchImpl: () => {} });
+  const common = fs.readFileSync('js/rq_common.js', 'utf8');
+  // Declarations are checked against source text: top-level let/const do not become
+  // properties of a vm context, so `typeof sb.x` cannot prove one is absent.
+  const declares = (src, n) =>
+    new RegExp(`(function|const|let|var)\\s+${n}\\b|\\b${n}\\s*=\\s*(function|\\()`).test(src);
+
+  console.log('module surface:');
+  check('RQ.sheets exposes exactly what the Preps card uses',
+        Object.keys(sb.window.RentalQuirks.sheets).sort(),
+        ['fetchPrepGroups', 'fetchPrepRows', 'fmtDate', 'getSheetIdFromUrl', 'windowDates']);
+  check('poller-era helpers stay removed',
+        ['makeStatePruner', 'runIfLeader', 'sleep'].filter(n => declares(common, n)), []);
+  check('rq_common keeps its long-standing helpers',
+        ['toTitleCase', 'multiword_match', 'doChangeEvent', 'find_tab_by_name', 'WindowDragger', 'RW_URL']
+          .filter(n => !declares(common, n)), []);
+  check('onFormLoadComplete is shared from rq_common',
+        typeof sb.window.RentalQuirks.onFormLoadComplete, 'function');
+  check('toTitleCase still behaves', sb.toTitleCase('4ft rgb led  panel'), '4ft RGB LED Panel');
+}
+
+// -- Date windows ----------------------------------------------------------
+{
+  const S = loadSandbox({ localStorage: storageProxy(), fetchImpl: () => {}, now: NOW }).window.RentalQuirks.sheets;
+  console.log('date windows:');
+  check('fmtDate has no leading zeros', S.fmtDate(new Date(2026, 3, 10)), '2026-4-10');
+  const w = S.windowDates(7, 13).map(d => d.str);
+  check('Preps window is -7..+13 (21 tabs), across a month boundary',
+        [w.length, w[0], w[7], w[20]], [21, '2026-2-26', '2026-3-5', '2026-3-18']);
+  check('windowDates yields Date objects too', S.windowDates(7, 13)[0].date instanceof Date, true);
+}
+
+// -- Sheet reading, request cache, formatting, cache invariants -------------
+(async () => {
+  const responses = {
+    '2026-3-5': gviz([['LA1001', 'Dana', 'Rm 1'], [null, 'Ghost', 'Rm 2'], ['LA1002', 'Reese', 'Rm 2']], COLS),
+    '2026-3-6': gviz([['LA1003', 'Sam', 'Rm 1']], COLS),
+    '2026-3-7': 'not a gviz response at all',
+    '2026-3-8': '__NETWORK_ERROR__',
+  };
+  const fetchImpl = (url) => {
+    const tab = decodeURIComponent(new RegExp('[?&]sheet=([^&]*)').exec(url)[1]);
+    const body = responses[tab];
+    if (body === '__NETWORK_ERROR__') return Promise.reject(new Error('offline'));
+    if (body === undefined) return Promise.resolve({ text: () => Promise.resolve(gviz([], COLS)) });
+    return Promise.resolve({ text: () => Promise.resolve(body) });
+  };
+  const S = loadSandbox({ localStorage: storageProxy(), fetchImpl, now: NOW }).window.RentalQuirks.sheets;
+
+  console.log('sheet reading:');
+  check('getSheetIdFromUrl extracts the id',
+        S.getSheetIdFromUrl('https://docs.google.com/spreadsheets/d/SHEET_ID_123/edit#gid=0'), 'SHEET_ID_123');
+  check('getSheetIdFromUrl rejects junk', S.getSheetIdFromUrl('not-a-sheet'), null);
+  check('getSheetIdFromUrl tolerates null', S.getSheetIdFromUrl(null), null);
+
+  const rows = await S.fetchPrepRows('SHEET', '2026-3-5');
+  check('rows without an order number are dropped', rows.length, 2);
+  check('raw columns preserved for the dashboard', rows[0]['Prep Location'], 'Rm 1');
+  check('malformed body yields []', (await S.fetchPrepRows('SHEET', '2026-3-7')).length, 0);
+  check('network error yields [] rather than rejecting', (await S.fetchPrepRows('SHEET', '2026-3-8')).length, 0);
+
+  const groups = await S.fetchPrepGroups('SHEET', S.windowDates(0, 3));
+  check('empty days omitted from groups', groups.map(g => g.str), ['2026-3-5', '2026-3-6']);
+  check('group keeps its Date', groups[0].date instanceof Date, true);
+  check('group rows keep every column', Object.keys(groups[0].rows[0]).sort(), [...COLS].sort());
+
+  console.log('request cache:');
+  let calls = 0;
+  const sbC = loadSandbox({ localStorage: storageProxy(),
+                           fetchImpl: (u) => { calls++; return fetchImpl(u); }, now: NOW });
+  const SC = sbC.window.RentalQuirks.sheets;
+  await SC.fetchPrepRows('SHEET', '2026-3-5');
+  check('first call hits the network', calls, 1);
+  await SC.fetchPrepRows('SHEET', '2026-3-5');
+  check('second call within TTL served from cache', calls, 1);
+  await SC.fetchPrepRows('SHEET', '2026-3-6');
+  check('a different tab is fetched separately', calls, 2);
+  calls = 0;
+  const [r1, r2] = await Promise.all([SC.fetchPrepRows('SHEET', '2026-3-9'), SC.fetchPrepRows('SHEET', '2026-3-9')]);
+  check('concurrent calls for one tab share a single fetch', calls, 1);
+  check('both concurrent callers get the same array', r1 === r2, true);
+  sbC.__clock.t = NOW + 3 * 60 * 1000; // past the 2-minute TTL
+  calls = 0;
+  await SC.fetchPrepRows('SHEET', '2026-3-5');
+  check('cache expires after TTL', calls, 1);
+
+  // -- formatDateRange, lifted from rq_dashboard.js -------------------------
+  console.log('date range formatting:');
+  const formatDateRange = new Function(extractFn('js/rq_dashboard.js', 'formatDateRange') + '; return formatDateRange;')();
+  const Y = new Date().getFullYear();
+  check('range within this year drops the year', formatDateRange(`${Y}-09-03`, `${Y}-09-10`), 'Sep 3 \u2013 Sep 10');
+  check('same start and stop collapses to one date', formatDateRange(`${Y}-09-03`, `${Y}-09-03`), 'Sep 3');
+  check('start only', formatDateRange(`${Y}-09-03`, null), 'Sep 3');
+  check('stop only', formatDateRange(null, `${Y}-09-10`), 'Sep 10');
+  check('neither yields null', formatDateRange(null, null), null);
+  check('malformed dates yield null', formatDateRange('garbage', 'also garbage'), null);
+  check('other-year dates carry the year',
+        formatDateRange(`${Y + 1}-01-05`, `${Y + 1}-01-09`), `Jan 5, ${Y + 1} \u2013 Jan 9, ${Y + 1}`);
+  check('year boundary annotates only the far side',
+        formatDateRange(`${Y}-12-30`, `${Y + 1}-01-02`), `Dec 30 \u2013 Jan 2, ${Y + 1}`);
+
+  // -- detailCache shape invariant ------------------------------------------
+  // Two writers once used different shapes ({data, fetchedAt} vs {record}), forcing
+  // every reader to probe both. These guard the single-shape invariant.
+  console.log('detailCache invariant:');
+  const dash = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  const writes = dash.match(/detailCache\.set\([^;]*\);/g) || [];
+  check('every writer emits { data, fetchedAt }',
+        writes.filter(w => !(/data:/.test(w) && /fetchedAt:/.test(w))), []);
+  check('both known writers are present', writes.length >= 2, true);
+  check('no reader probes the old bare-record shape',
+        (dash.match(/\?\?\s*(cached|detail)\?\.record\b/g) || []), []);
+  // Scoped to the set() calls rather than the whole file: a mention of this in a
+  // comment must not be enough to satisfy the check.
+  check('list stubs are stored stale so a real fetch still happens',
+        writes.some(w => /fetchedAt:\s*0\b/.test(w)), true);
+
+  console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
+  process.exit(failures ? 1 : 0);
+})();
