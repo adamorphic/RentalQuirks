@@ -253,10 +253,18 @@
     return loc.trim().toUpperCase();
   }
 
+  // In-flight requests, so several row features asking for the same record share one
+  // fetch instead of racing. Rows ask more than once (the due badge and the date
+  // range both need the record), and a card can hold 50 rows.
+  const detailInFlight = new Map(); // key -> Promise
+
   function fetchRecordDetail(module, recordNumber, knownId = null) {
     const key = module + ':' + recordNumber;
     const cached = detailCache.get(key);
     if (cached && (Date.now() - cached.fetchedAt) < DETAIL_TTL) return Promise.resolve(cached.data);
+
+    const pending = detailInFlight.get(key);
+    if (pending) return pending;
 
     const fetchOpts = {
       headers: {
@@ -268,7 +276,7 @@
     };
 
     const idPromise = knownId ? Promise.resolve(knownId) : RQ.api.get_id_from_code(module, recordNumber);
-    return idPromise.then(id => {
+    const result = idPromise.then(id => {
       if (!id) return null;
       const controller = window[module + 'Controller'];
       if (!controller?.apiurl) return null;
@@ -298,6 +306,9 @@
         return detail;
       });
     });
+
+    detailInFlight.set(key, result);
+    return result.finally(() => detailInFlight.delete(key));
   }
 
   // ── Code 128B barcode generator ───────────────────────────────────
@@ -2812,6 +2823,58 @@
     return row;
   }
 
+  // ── Est. start/stop date range on the row face ─────────────────────
+  // Shows the record's estimated start and stop dates inline, so the schedule is
+  // readable without expanding each row. Resolution mirrors attachDueBadge: a full
+  // cached record, else a pre-populated list item if it happens to carry the fields,
+  // else a fetch. The list endpoint for these cards does not return the dates, so
+  // the fetch normally does happen - but the due badge already triggers it for the
+  // same record, and fetchRecordDetail now shares in-flight requests, so this adds
+  // no extra network traffic.
+  const HAS_EST_DATES = ['Order', 'Quote', 'Contract', 'Deal', 'Invoice', 'PurchaseOrder'];
+
+  // "Sep 3 - Sep 10", with the year shown only when a date falls outside this year.
+  function formatDateRange(startStr, stopStr) {
+    const thisYear = new Date().getFullYear();
+    const fmt = (str) => {
+      if (!str) return null;
+      const d = new Date(String(str).slice(0, 10) + 'T00:00:00');
+      if (isNaN(d)) return null;
+      const opts = { month: 'short', day: 'numeric' };
+      if (d.getFullYear() !== thisYear) opts.year = 'numeric';
+      return d.toLocaleDateString('en-US', opts);
+    };
+    const a = fmt(startStr), b = fmt(stopStr);
+    if (a && b) return a === b ? a : a + ' – ' + b;
+    return a || b || null;
+  }
+
+  function attachDateRange(container, module, recordNumber) {
+    if (!HAS_EST_DATES.includes(module) || !recordNumber) return;
+
+    const span = el('span', `
+      font-size: 10px; color: #6a8a9a; margin-left: 6px; white-space: nowrap;
+      flex-shrink: 0; display: none;
+    `);
+    span.className = 'rq-date-range';
+
+    const apply = (record) => {
+      const text = formatDateRange(record?.EstimatedStartDate, record?.EstimatedStopDate);
+      if (!text) return;
+      span.textContent = text;
+      span.title = 'Estimated start – stop';
+      span.style.display = 'inline-block';
+    };
+
+    const cached = detailCache.get(module + ':' + recordNumber);
+    if (cached?.fetchedAt !== undefined) apply(cached.data?.record);
+    else if (cached?.record?.EstimatedStopDate !== undefined ||
+             cached?.record?.EstimatedStartDate !== undefined) apply(cached.record);
+    else fetchRecordDetail(module, recordNumber).then(d => apply(d?.record)).catch(() => {});
+
+    container.appendChild(span);
+  }
+
   function draggableCardRow(icon, primary, secondary, onClick, meta, onArchive) {
     const tags = meta?.tags || [];
 
@@ -2884,6 +2947,7 @@
         subEl.title = subLabel;
         sWrap.appendChild(subEl);
       }
+      if (meta?.module && meta?.recordNumber) attachDateRange(sWrap, meta.module, meta.recordNumber);
       text.appendChild(sWrap);
       if (meta?.subinfo) {
         const subinfoEl = el('div', `
