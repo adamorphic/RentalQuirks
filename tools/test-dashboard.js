@@ -342,6 +342,69 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         extractFn('js/rq_dashboard.js', 'buildGridBrowsePayload').trim().endsWith('}'), true);
 
 
+  // -- The "+N more" expander -------------------------------------------------
+  // Driven through a minimal fake DOM so the real renderRowItems is exercised,
+  // including the collapse path, which is easy to get wrong (a list of exactly
+  // PREVIEW items must show no toggle at all).
+  console.log('item expander:');
+  const fakeEl = (tag, css, html) => {
+    const node = {
+      tag, style: {}, children: [], textContent: html ?? '', handlers: {},
+      appendChild(c) { node.children.push(c); return c; },
+      append(...cs) { node.children.push(...cs); },
+      addEventListener(t, fn) { (node.handlers[t] ||= []).push(fn); },
+      click() { (node.handlers.click || []).forEach(fn => fn({ stopPropagation() {} })); },
+      set innerHTML(v) { if (v === '') node.children.length = 0; },
+      get innerHTML() { return ''; },
+    };
+    return node;
+  };
+
+  const RRI = new Function('el', 'ROW_ITEMS_PREVIEW', 'buildRowItemLine',
+    extractFn('js/rq_dashboard.js', 'renderRowItems') + '; return renderRowItems;')(
+    fakeEl, 4, (it) => ({ line: it.ICode }));
+
+  const mk = n => Array.from({ length: n }, (_, i) => ({ ICode: 'I' + i }));
+  const drive = (n) => {
+    const holder = fakeEl('div');
+    RRI(holder, mk(n));
+    const [list, toggle] = holder.children;
+    return { holder, list, toggle };
+  };
+
+  let v = drive(10);
+  check('shows only the preview count at first', v.list.children.length, 4);
+  check('toggle reports the remainder', v.toggle.textContent, '+6 more');
+  check('toggle is visible when there is a remainder', v.toggle.style.display, '');
+
+  v.toggle.click();
+  check('expands to every item', v.list.children.length, 10);
+  check('toggle offers to collapse', v.toggle.textContent, 'show less');
+
+  v.toggle.click();
+  check('collapses back to the preview', v.list.children.length, 4);
+  check('toggle reports the remainder again', v.toggle.textContent, '+6 more');
+
+  v = drive(3);
+  check('short list shows everything', v.list.children.length, 3);
+  check('short list hides the toggle', v.toggle.style.display, 'none');
+
+  v = drive(4);
+  check('exactly the preview count shows all', v.list.children.length, 4);
+  check('exactly the preview count hides the toggle', v.toggle.style.display, 'none');
+
+  const empty = fakeEl('div');
+  RRI(empty, []);
+  check('no items renders nothing', empty.children.length, 0);
+
+  // Sub Rentals must go through the same expander rather than its own loop.
+  const dashSrc2 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('sub-rental blocks use the shared expander',
+        /buildSubRentalOrderBlock[\s\S]{0,2000}?renderRowItems\(holder, items, buildSubRentalItemLine\)/.test(dashSrc2), true);
+  check('sub-rental quantities survive the shared line builder',
+        /ITEM_QTY_FIELDS\s*=\s*\[[^\]]*'SubQuantity'/.test(dashSrc2), true);
+
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
 })();

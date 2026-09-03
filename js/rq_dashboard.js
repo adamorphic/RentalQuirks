@@ -4072,8 +4072,9 @@
   }
 
   // Renders a preview of `items` with a "+N more" toggle. Collapsing again is
-  // useful when a PO has fifty lines and you only opened it to glance.
-  function renderRowItems(holder, items) {
+  // useful when a record has fifty lines and you only opened it to glance.
+  // buildLine is overridable so callers can annotate their own line shape.
+  function renderRowItems(holder, items, buildLine = buildRowItemLine) {
     holder.innerHTML = '';
     if (!items || !items.length) return;
 
@@ -4085,7 +4086,7 @@
     const draw = () => {
       list.innerHTML = '';
       const shown = expanded ? items : items.slice(0, ROW_ITEMS_PREVIEW);
-      shown.forEach(it => list.appendChild(buildRowItemLine(it)));
+      shown.forEach(it => list.appendChild(buildLine(it)));
       const hidden = items.length - shown.length;
       if (hidden > 0)      { toggle.textContent = `+${hidden} more`; toggle.style.display = ''; }
       else if (expanded && items.length > ROW_ITEMS_PREVIEW) { toggle.textContent = 'show less'; toggle.style.display = ''; }
@@ -4296,28 +4297,22 @@
     });
     wrap.appendChild(head);
 
-    items.forEach(it => {
-      const line = el('div', `
-        display: flex; gap: 8px; align-items: baseline;
-        padding-left: 12px; margin-top: 2px; font-size: 11px; color: #888;`);
-      line.appendChild(el('span', 'color: #7a9aba; flex-shrink: 0; min-width: 62px;', it.ICode || ''));
-      line.appendChild(el('span', `
-        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto;`,
-        it.Description || ''));
-      const qty = Number(it.SubQuantity);
-      if (Number.isFinite(qty) && qty) {
-        line.appendChild(el('span', 'color: #666; flex-shrink: 0;',
-                            '×' + (qty % 1 ? qty : qty.toFixed(0))));
-      }
-      // A vendor with no PO is half-sourced; say so rather than showing it as untouched.
-      if (String(it.Vendor || '').trim()) {
-        line.appendChild(el('span', 'color: #7a6a4a; flex-shrink: 0;',
-                            it.Vendor + ' · no PO'));
-      }
-      wrap.appendChild(line);
-    });
+    const holder = el('div', 'padding-left: 12px;');
+    renderRowItems(holder, items, buildSubRentalItemLine);
+    wrap.appendChild(holder);
 
     return wrap;
+  }
+
+  // Same shape as a PO line, plus a note when a vendor is set but no PO has been
+  // raised - that line is half-sourced rather than untouched.
+  function buildSubRentalItemLine(it) {
+    const line = buildRowItemLine(it);
+    if (String(it.Vendor || '').trim()) {
+      line.appendChild(el('span', 'color: #7a6a4a; flex-shrink: 0;',
+                          it.Vendor + ' · no PO'));
+    }
+    return line;
   }
 
   function buildSubRentalsCard() {
