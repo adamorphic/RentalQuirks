@@ -3861,6 +3861,7 @@
                 hidden: ['CANCELLED', 'CLOSED'],            unavailable: 'Order module not available',          failed: 'Failed to load orders' },
     mypos:    { title: 'My POs', agentKey: MY_POS_AGENT_KEY,    controller: 'PurchaseOrderController',
                 module: 'PurchaseOrder', icon: 'shopping_cart', numberField: 'PurchaseOrderNumber',
+                listItems: fetchPurchaseOrderItems,
                 hidden: ['CLOSED', 'VOID'],                 unavailable: 'Purchase Order module not available', failed: 'Failed to load POs' },
     myquotes: { title: 'My Quotes', agentKey: MY_QUOTES_AGENT_KEY, controller: 'QuoteController',
                 module: 'Quote',         icon: 'request_quote', numberField: 'QuoteNumber',
@@ -3959,6 +3960,9 @@
       _raw:         item,
     }));
 
+    const itemFetcher = AGENT_SECTIONS[cardId]?.listItems ?? null;
+    const itemTargets = [];
+
     const sort = getBuiltinSort(cardId);
     if (sort) sortItemsInPlace(sortable, sort.field, sort.dir);
 
@@ -3976,12 +3980,143 @@
       );
       row.dataset.rowIndex = idx;
       body.appendChild(row);
+
+      if (itemFetcher && idField && _raw[idField]) {
+        // Sibling of the row, not a child: the row itself is a single flex line.
+        const holder = el('div', 'padding: 0 14px 5px 40px;');
+        holder.className = 'rq-row-items';
+        body.appendChild(holder);
+        itemTargets.push({ id: _raw[idField], holder });
+      }
     });
+
+    if (itemTargets.length) fillRowItems(itemTargets, itemFetcher);
   }
 
   function loadMyOrders(forceRefresh = false) { loadAgentSection('myorders', forceRefresh); }
 
   function loadMyQuotes(forceRefresh = false) { loadAgentSection('myquotes', forceRefresh); }
+
+  // ── Line items under agent-card rows ──────────────────────────────
+  // Shows a record's lines beneath its row, a few at a time with an expander.
+  const ROW_ITEMS_PREVIEW = 4;
+  const ROW_ITEMS_TTL     = 10 * 60 * 1000;
+  const rowItemsCache = new Map(); // recordId -> { items, fetchedAt }
+
+  // Every RW grid /browse wants the same envelope; only the module, the scoping
+  // fields and the sort differ. Kept in one place so a third grid doesn't become
+  // a third copy of twenty boilerplate keys.
+  function buildGridBrowsePayload({ module, miscfields, uniqueids, orderby, pagesize = 500 }) {
+    return {
+      activeview: '', boundids: {}, clientVersion: window.applicationConfig?.clientVersion ?? '',
+      fields: [], filterfields: {}, miscfields, module, options: {},
+      orderby, orderbydirection: '', pageno: 1, pagesize,
+      requestid: (crypto?.randomUUID?.() ?? String(Date.now()) + Math.random()),
+      searchcondition: [], searchconjunctions: [], searchfieldoperators: [], searchfields: [],
+      searchfieldtypes: [], searchfieldvalues: [], searchgroupings: [], searchseparators: [],
+      timezoneOffset: -new Date().getTimezoneOffset() / 60,
+      top: 0, totalfields: [], uniqueids,
+    };
+  }
+
+  function postGridBrowse(path, payload) {
+    return fetch(RW_URL + path, { method: 'POST', headers: rwHeaders(), body: JSON.stringify(payload) })
+      .then(r => (r.ok ? r.json() : null))
+      .then(decodeGridRows)
+      .catch(() => []);
+  }
+
+  // Purchase order lines. RW serves these from the *order* item grid: module
+  // OrderItemGrid, scoped by miscfields.PurchaseOrderId, with the PO's id passed
+  // in uniqueids under the key OrderId. Subs and NoAvailabilityCheck mirror what
+  // the PO screen itself sends.
+  function fetchPurchaseOrderItems(poId) {
+    return postGridBrowse('api/v1/orderitem/browse', buildGridBrowsePayload({
+      module: 'OrderItemGrid',
+      miscfields: { PurchaseOrderId: { datafield: 'PurchaseOrderId', value: poId } },
+      uniqueids: { OrderId: poId, RecType: 'R', Subs: true, NoAvailabilityCheck: true },
+      orderby: 'ItemOrder asc,PrimaryOrderItemId asc,SubPurchaseOrderItemId asc,' +
+               'OrderItemId asc,PoSubOrderNumber asc',
+    }));
+  }
+
+  // Column names differ between grids, so take the first candidate that is present
+  // rather than assuming one spelling.
+  function pickField(row, names) {
+    for (const n of names) {
+      const v = row?.[n];
+      if (v !== undefined && v !== null && v !== '') return v;
+    }
+    return null;
+  }
+
+  const ITEM_CODE_FIELDS = ['ICode', 'ItemCode', 'Code'];
+  const ITEM_DESC_FIELDS = ['Description', 'ItemDescription'];
+  const ITEM_QTY_FIELDS  = ['QuantityOrdered', 'Quantity', 'OrderQuantityOrdered', 'SubQuantity', 'Qty'];
+
+  function buildRowItemLine(it) {
+    const line = el('div', `
+      display: flex; gap: 8px; align-items: baseline;
+      margin-top: 2px; font-size: 11px; color: #888;`);
+    const code = pickField(it, ITEM_CODE_FIELDS);
+    const desc = pickField(it, ITEM_DESC_FIELDS);
+    line.appendChild(el('span', 'color: #7a9aba; flex-shrink: 0; min-width: 62px;', code ?? ''));
+    line.appendChild(el('span', `
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto;`, desc ?? ''));
+    const qty = Number(pickField(it, ITEM_QTY_FIELDS));
+    if (Number.isFinite(qty) && qty) {
+      line.appendChild(el('span', 'color: #666; flex-shrink: 0;',
+                          '×' + (qty % 1 ? qty : qty.toFixed(0))));
+    }
+    return line;
+  }
+
+  // Renders a preview of `items` with a "+N more" toggle. Collapsing again is
+  // useful when a PO has fifty lines and you only opened it to glance.
+  function renderRowItems(holder, items) {
+    holder.innerHTML = '';
+    if (!items || !items.length) return;
+
+    let expanded = false;
+    const list = el('div', '');
+    const toggle = el('div', `
+      margin-top: 2px; font-size: 10px; color: #5a7a8a; cursor: pointer; user-select: none;`);
+
+    const draw = () => {
+      list.innerHTML = '';
+      const shown = expanded ? items : items.slice(0, ROW_ITEMS_PREVIEW);
+      shown.forEach(it => list.appendChild(buildRowItemLine(it)));
+      const hidden = items.length - shown.length;
+      if (hidden > 0)      { toggle.textContent = `+${hidden} more`; toggle.style.display = ''; }
+      else if (expanded && items.length > ROW_ITEMS_PREVIEW) { toggle.textContent = 'show less'; toggle.style.display = ''; }
+      else                 { toggle.style.display = 'none'; }
+    };
+
+    toggle.addEventListener('click', (e) => { e.stopPropagation(); expanded = !expanded; draw(); });
+    toggle.addEventListener('mouseenter', () => { toggle.style.color = '#8ac'; });
+    toggle.addEventListener('mouseleave', () => { toggle.style.color = '#5a7a8a'; });
+
+    holder.append(list, toggle);
+    draw();
+  }
+
+  // Fills each row's item holder, a few requests at a time so a card of 50 rows
+  // doesn't fire 50 parallel fetches. Cached results render immediately.
+  async function fillRowItems(targets, fetcher) {
+    const pending = [];
+    for (const t of targets) {
+      const hit = rowItemsCache.get(t.id);
+      if (hit && (Date.now() - hit.fetchedAt) < ROW_ITEMS_TTL) renderRowItems(t.holder, hit.items);
+      else pending.push(t);
+    }
+    if (!pending.length) return;
+
+    await mapWithLimit(pending, SUBRENTAL_CONCURRENCY, async (t) => {
+      const items = await fetcher(t.id);
+      rowItemsCache.set(t.id, { items, fetchedAt: Date.now() });
+      if (t.holder.isConnected) renderRowItems(t.holder, items);
+    });
+  }
 
   // ── Sub Rentals card ──────────────────────────────────────────────
   // Sub-rental lines still waiting to be sourced, across orders picking soon,
@@ -4022,24 +4157,12 @@
   }
 
   function fetchOrderSubItems(orderId) {
-    const body = {
-      activeview: '', boundids: {}, clientVersion: window.applicationConfig?.clientVersion ?? '',
-      fields: [], filterfields: {},
+    return postGridBrowse('api/v1/ordersubitem/browse', buildGridBrowsePayload({
+      module: 'OrderSubItemGrid',
       miscfields: { OrderId: { datafield: 'OrderId', value: orderId } },
-      module: 'OrderSubItemGrid', options: {}, orderby: 'ItemOrder asc', orderbydirection: '',
-      pageno: 1, pagesize: 500,
-      requestid: (crypto?.randomUUID?.() ?? String(Date.now()) + Math.random()),
-      searchcondition: [], searchconjunctions: [], searchfieldoperators: [], searchfields: [],
-      searchfieldtypes: [], searchfieldvalues: [], searchgroupings: [], searchseparators: [],
-      timezoneOffset: -new Date().getTimezoneOffset() / 60,
-      top: 0, totalfields: [],
       uniqueids: { OrderId: orderId, RecType: 'R' },
-    };
-    return fetch(RW_URL + 'api/v1/ordersubitem/browse',
-                 { method: 'POST', headers: rwHeaders(), body: JSON.stringify(body) })
-      .then(r => (r.ok ? r.json() : null))
-      .then(decodeGridRows)
-      .catch(() => []);
+      orderby: 'ItemOrder asc',
+    }));
   }
 
   // Sourcing attaches both a vendor and a sub-PO, so a line missing either is not

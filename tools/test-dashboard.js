@@ -78,8 +78,15 @@ function extractFn(file, name) {
   let start = src.indexOf(`  function ${name}(`);
   if (start === -1) start = src.indexOf(`  async function ${name}(`);
   if (start === -1) throw new Error(`${name} not found in ${file}`);
-  let i = src.indexOf('{', start), depth = 0;
+  // Walk the parameter list first: destructured params contain braces of their own,
+  // so scanning for the first '{' after the name finds the wrong one.
+  let i = src.indexOf('(', start), depth = 0;
   for (; i < src.length; i++) {
+    if (src[i] === '(') depth++;
+    else if (src[i] === ')') { depth--; if (depth === 0) { i++; break; } }
+  }
+  i = src.indexOf('{', i);
+  for (depth = 0; i < src.length; i++) {
     if (src[i] === '{') depth++;
     else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(start, i + 1); }
   }
@@ -286,6 +293,53 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('nothing has a builder that is not a built-in id', builders.filter(b => !ids.includes(b)), []);
   check('the new card is registered everywhere',
         [ids, defs, builders].map(l => l.includes('subrentals')), [true, true, true]);
+
+
+  // -- Grid browse payload + PO line items -----------------------------------
+  // The PO screen's own request was captured from the network tab; these pin the
+  // quirks of it, because none of them are guessable: PO lines come from the
+  // *order* item grid, and the PO's id travels in uniqueids under the key OrderId.
+  console.log('grid browse / PO items:');
+  const GB = new Function('window', 'crypto',
+    extractFn('js/rq_dashboard.js', 'buildGridBrowsePayload') +
+    extractFn('js/rq_dashboard.js', 'pickField') +
+    '; return { buildGridBrowsePayload, pickField };')(
+    { applicationConfig: { clientVersion: '2026.1.008' } }, { randomUUID: () => 'uuid-1' });
+
+  const poPayload = GB.buildGridBrowsePayload({
+    module: 'OrderItemGrid',
+    miscfields: { PurchaseOrderId: { datafield: 'PurchaseOrderId', value: 'A01YDY2D' } },
+    uniqueids: { OrderId: 'A01YDY2D', RecType: 'R', Subs: true, NoAvailabilityCheck: true },
+    orderby: 'ItemOrder asc' });
+
+  check('PO lines use the order item grid module', poPayload.module, 'OrderItemGrid');
+  check('scoped by miscfields.PurchaseOrderId', poPayload.miscfields,
+        { PurchaseOrderId: { datafield: 'PurchaseOrderId', value: 'A01YDY2D' } });
+  check('uniqueids carry the PO id under the OrderId key', poPayload.uniqueids,
+        { OrderId: 'A01YDY2D', RecType: 'R', Subs: true, NoAvailabilityCheck: true });
+  check('paging defaults', [poPayload.pageno, poPayload.pagesize], [1, 500]);
+  check('clientVersion is read from RW, not hardcoded', poPayload.clientVersion, '2026.1.008');
+  check('envelope carries every key RW expects',
+        ['activeview','boundids','clientVersion','fields','filterfields','miscfields','module',
+         'options','orderby','orderbydirection','pageno','pagesize','requestid','searchcondition',
+         'searchconjunctions','searchfieldoperators','searchfields','searchfieldtypes',
+         'searchfieldvalues','searchgroupings','searchseparators','timezoneOffset','top',
+         'totalfields','uniqueids'].filter(k => !(k in poPayload)), []);
+
+  // Column names differ between grids, so the renderer tries several spellings.
+  const CODE = ['ICode', 'ItemCode', 'Code'];
+  const QTY  = ['QuantityOrdered', 'Quantity', 'OrderQuantityOrdered', 'SubQuantity', 'Qty'];
+  check('picks the first present code field', GB.pickField({ ICode: 'FX3' }, CODE), 'FX3');
+  check('falls back to a later spelling', GB.pickField({ ItemCode: 'LENS' }, CODE), 'LENS');
+  check('treats empty string as absent', GB.pickField({ ICode: '', Code: 'X' }, CODE), 'X');
+  check('null when no candidate matches', GB.pickField({ Nope: 1 }, CODE), null);
+  check('quantity from QuantityOrdered', GB.pickField({ QuantityOrdered: 3 }, QTY), 3);
+  check('quantity falls back to SubQuantity', GB.pickField({ SubQuantity: 2 }, QTY), 2);
+  check('an absent row is safe', GB.pickField(undefined, CODE), null);
+
+  // extractFn itself: it must survive destructured parameter lists.
+  check('extractFn handles destructured params',
+        extractFn('js/rq_dashboard.js', 'buildGridBrowsePayload').trim().endsWith('}'), true);
 
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
