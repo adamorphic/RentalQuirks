@@ -1170,6 +1170,9 @@
     }
 
     function applyBadge(stopDateStr) {
+      // Recomputed from scratch each pass: a record stops being due today by being
+      // snoozed, rescheduled, or simply by the clock rolling over.
+      row.classList.remove('rq-due-today');
       if (!stopDateStr) return;
       if (isSnoozed(module, recordNumber)) {
         badge.textContent = '·';
@@ -1195,6 +1198,7 @@
         badge.textContent = 'due today';
         badge.style.background = '#4a3a1a';
         badge.style.color = '#e09820';
+        row.classList.add('rq-due-today');
       } else {
         badge.textContent = `${days}d left`;
         badge.style.background = days <= 3 ? '#4a2a1a' : '#1e2e1e';
@@ -1291,6 +1295,9 @@
         '.rq-cfg-bar.rq-cfg-hidden { display:none !important; }',
         '.rq-cfg-bar .rq-cfg-input-wrap { flex:1 !important; min-width:0; overflow:hidden; }',
         '.rq-cfg-bar .rq-cfg-input-wrap input { width:100%; box-sizing:border-box; min-width:0; }',
+        // Rows assign style.background inline on hover, which would paint over a
+        // tint, so the due-today marker is an inset shadow on the leading edge.
+        '.rq-due-today { box-shadow: inset 3px 0 0 #e09820; }',
       ].join('\n');
       document.head.appendChild(style);
     }

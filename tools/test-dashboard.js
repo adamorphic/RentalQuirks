@@ -599,6 +599,73 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         /applyDashboardLayout\(\); \/\/ restore the saved/.test(dashSrc6), true);
 
 
+  // -- Due-today row highlight ------------------------------------------------
+  // Runs the real applyBadge against a fake row and a fixed clock. The marker is
+  // an inset shadow rather than a background because rows assign background
+  // inline on hover; the class must also be cleared on every pass, or a record
+  // stays highlighted after being snoozed or rescheduled.
+  console.log('due-today highlight:');
+  const TODAY = new Date(2026, 8, 3).getTime(); // 2026-09-03, local
+  const mkRow = () => {
+    const c = new Set();
+    return { classList: { add: x => c.add(x), remove: x => c.delete(x), contains: x => c.has(x) } };
+  };
+  const mkBadge = () => ({ style: {}, dataset: {}, textContent: '', title: '' });
+
+  const mkApplyBadge = ({ snoozed = false } = {}) => {
+    const row = mkRow(), badge = mkBadge();
+    const RealDate = Date;
+    const ClockDate = class extends RealDate {
+      constructor(...a) { super(...(a.length ? a : [TODAY])); }
+    };
+    const fn = new Function('row', 'badge', 'isSnoozed', 'isSectionHiding', 'module', 'recordNumber', 'Date',
+      extractFn('js/rq_dashboard.js', 'applyBadge') + '; return applyBadge;')(
+      row, badge, () => snoozed, () => false, 'Order', 'LA1', ClockDate);
+    return { fn, row, badge };
+  };
+
+  let t = mkApplyBadge();
+  t.fn('2026-09-03');
+  check('due today is highlighted', t.row.classList.contains('rq-due-today'), true);
+  check('and the badge says so', t.badge.textContent, 'due today');
+
+  t = mkApplyBadge();
+  t.fn('2026-09-04');
+  check('due tomorrow is not highlighted', t.row.classList.contains('rq-due-today'), false);
+
+  t = mkApplyBadge();
+  t.fn('2026-09-01');
+  check('overdue is not highlighted', t.row.classList.contains('rq-due-today'), false);
+  check('but still badged as overdue', /overdue/.test(t.badge.textContent), true);
+
+  t = mkApplyBadge();
+  t.fn('2027-01-01');
+  check('far future is not highlighted', t.row.classList.contains('rq-due-today'), false);
+
+  t = mkApplyBadge();
+  t.fn(null);
+  check('no date is not highlighted', t.row.classList.contains('rq-due-today'), false);
+
+  t = mkApplyBadge({ snoozed: true });
+  t.fn('2026-09-03');
+  check('a snoozed record due today is not highlighted', t.row.classList.contains('rq-due-today'), false);
+
+  // The clearing path: highlighted, then re-applied with a date that is not today.
+  t = mkApplyBadge();
+  t.fn('2026-09-03');
+  const wasSet = t.row.classList.contains('rq-due-today');
+  t.fn('2026-09-10');
+  check('rescheduling clears a previous highlight',
+        [wasSet, t.row.classList.contains('rq-due-today')], [true, false]);
+  t.fn('2026-09-03');
+  t.fn(null);
+  check('losing the date clears the highlight too', t.row.classList.contains('rq-due-today'), false);
+
+  const dashSrc7 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('the marker survives hover by not using background',
+        /\.rq-due-today \{ box-shadow: inset/.test(dashSrc7), true);
+
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
 })();
