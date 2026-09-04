@@ -666,6 +666,36 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         /\.rq-due-today \{ box-shadow: inset/.test(dashSrc7), true);
 
 
+  // -- Agent query cap --------------------------------------------------------
+  // The cards ask for a single page with no ordering, so exceeding the cap loses
+  // records silently. These pin the cap, that it reaches the query, and that the
+  // notice appears only when the server says there is more.
+  console.log('agent query cap:');
+  const dashSrc8 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  const capMatch = dashSrc8.match(/const AGENT_PAGE_SIZE = (\d+);/);
+  check('the cap is a named constant', !!capMatch, true);
+  check('and is well above the old 50', Number(capMatch[1]) >= 200, true);
+  check('the query uses the constant, not a literal',
+        /pagesize=' \+ AGENT_PAGE_SIZE \+ '/.test(dashSrc8), true);
+  check('no hardcoded pagesize=50 remains on the agent query',
+        /apiurl \+ '\?pagesize=50/.test(dashSrc8), false);
+  check('the notice is driven by the server total, not the rendered count',
+        /totalAvailable > AGENT_PAGE_SIZE/.test(dashSrc8), true);
+  check('the total is cached so a cached render can still report it',
+        /setCachedSection\(cardId, \{ items, total,/.test(dashSrc8), true);
+  check('the cached render passes it through',
+        /renderBuiltinRows\(cardId, cached\.items, cfg\.module, cfg\.icon, cached\.total\)/.test(dashSrc8), true);
+
+  // The guard condition itself, in isolation.
+  const CAP = Number(capMatch[1]);
+  const shows = (total) => Number.isFinite(total) && total > CAP;
+  check('under the cap shows no notice', shows(CAP - 1), false);
+  check('exactly the cap shows no notice', shows(CAP), false);
+  check('over the cap shows the notice', shows(CAP + 1), true);
+  check('a missing total shows no notice', shows(undefined), false);
+  check('a non-numeric total shows no notice', shows(Number('nope')), false);
+
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
 })();
