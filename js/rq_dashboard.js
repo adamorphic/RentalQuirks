@@ -1337,7 +1337,23 @@
     closeBtn.addEventListener('mouseenter', () => { closeBtn.style.color = '#fff'; closeBtn.style.background = '#333'; });
     closeBtn.addEventListener('mouseleave', () => { closeBtn.style.color = '#888'; closeBtn.style.background = ''; });
     closeBtn.addEventListener('click', closePanel);
-    header.append(title, closeBtn);
+
+    const expandBtn = el('i', `
+      cursor: pointer; color: #888; font-size: 17px; line-height: 1;
+      padding: 4px 6px; border-radius: 4px;
+      transition: color 0.15s, background 0.15s;
+    `);
+    expandBtn.className = 'material-icons';
+    expandBtn.id = 'rq-dashboard-expand';
+    expandBtn.textContent = 'open_in_full';
+    expandBtn.title = 'Expand to full screen';
+    expandBtn.addEventListener('mouseenter', () => { expandBtn.style.color = '#fff'; expandBtn.style.background = '#333'; });
+    expandBtn.addEventListener('mouseleave', () => { expandBtn.style.color = '#888'; expandBtn.style.background = ''; });
+    expandBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleDashboardExpanded(); });
+
+    const headerBtns = el('div', 'display: flex; align-items: center; gap: 2px;');
+    headerBtns.append(expandBtn, closeBtn);
+    header.append(title, headerBtns);
 
     // Search bar
     const searchWrap = el('div', `
@@ -1605,6 +1621,51 @@
   // ── Open / Close ───────────────────────────────────────────────────
   let panelBuilt = false;
 
+  // ── Expanded layout ───────────────────────────────────────────────
+  // The panel is a 575px column, which suits a single list but wastes a wide
+  // screen once several cards are open. Expanded mode fills the viewport and
+  // flows cards into as many columns as fit, so a day's work is visible at a
+  // glance instead of behind a scroll.
+  const DASH_EXPANDED_KEY = 'rq-dashboard-expanded';
+  const DASH_PANEL_WIDTH  = '575px';
+  const DASH_MIN_COLUMN   = 340; // narrower than this and a card stops being readable
+
+  function isDashExpanded() {
+    return localStorage.getItem(DASH_EXPANDED_KEY) === '1';
+  }
+
+  function applyDashboardLayout() {
+    const panel = document.getElementById('rq-dashboard');
+    const body  = document.getElementById('rq-dashboard-body');
+    if (!panel || !body) return;
+    const expanded = isDashExpanded();
+
+    panel.style.width = expanded ? '100vw' : DASH_PANEL_WIDTH;
+
+    if (expanded) {
+      body.style.display = 'grid';
+      body.style.gridTemplateColumns = `repeat(auto-fill, minmax(${DASH_MIN_COLUMN}px, 1fr))`;
+      body.style.alignItems = 'start'; // each card keeps its own height
+      body.style.flexDirection = '';
+    } else {
+      body.style.display = 'flex';
+      body.style.flexDirection = 'column';
+      body.style.gridTemplateColumns = '';
+      body.style.alignItems = '';
+    }
+
+    const btn = document.getElementById('rq-dashboard-expand');
+    if (btn) {
+      btn.textContent = expanded ? 'close_fullscreen' : 'open_in_full';
+      btn.title = expanded ? 'Shrink to a panel' : 'Expand to full screen';
+    }
+  }
+
+  function toggleDashboardExpanded() {
+    localStorage.setItem(DASH_EXPANDED_KEY, isDashExpanded() ? '0' : '1');
+    applyDashboardLayout();
+  }
+
   function openPanel() {
     if (!panelBuilt) {
       buildPanel();
@@ -1614,6 +1675,7 @@
       renderTabBar(tabs, getActiveTab(tabs).id);
       renderCards();
     }
+    applyDashboardLayout(); // restore the saved width and columns before showing
     const panel = document.getElementById('rq-dashboard');
     const overlay = document.getElementById('rq-dashboard-overlay');
     overlay.style.opacity = '1';
@@ -1672,7 +1734,11 @@
       e.preventDefault();
       e.stopPropagation();
       const rect = card.getBoundingClientRect();
-      const before = e.clientY < rect.top + rect.height / 2;
+      // Cards stack vertically in panel mode and flow into columns when expanded,
+      // so the axis deciding "before or after" changes with the layout.
+      const before = isDashExpanded()
+        ? e.clientX < rect.left + rect.width / 2
+        : e.clientY < rect.top  + rect.height / 2;
       clearSectionDropIndicators();
       card.style.boxShadow = before
         ? '0 -2px 0 0 #5a9a5a'
@@ -1695,7 +1761,11 @@
       if (!draggedCard || draggedCard === card) return;
 
       const rect = card.getBoundingClientRect();
-      const before = e.clientY < rect.top + rect.height / 2;
+      // Cards stack vertically in panel mode and flow into columns when expanded,
+      // so the axis deciding "before or after" changes with the layout.
+      const before = isDashExpanded()
+        ? e.clientX < rect.left + rect.width / 2
+        : e.clientY < rect.top  + rect.height / 2;
       if (before) card.before(draggedCard);
       else card.after(draggedCard);
 

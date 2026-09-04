@@ -532,6 +532,73 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         /vendor: sub, customer: null/.test(dashSrc5), true);
 
 
+  // -- Expanded (full-screen) layout ------------------------------------------
+  // Driven through a fake DOM so the real applyDashboardLayout runs. The property
+  // that matters is that the two modes fully undo each other: a leftover
+  // gridTemplateColumns or flexDirection makes the other layout misbehave.
+  console.log('expanded layout:');
+  const layoutStore = storageProxy();
+  const nodes = {
+    'rq-dashboard':      { style: {} },
+    'rq-dashboard-body': { style: {} },
+    'rq-dashboard-expand': { style: {}, textContent: '', title: '' },
+  };
+  const LY = new Function('localStorage', 'document',
+    "const DASH_EXPANDED_KEY='rq-dashboard-expanded';const DASH_PANEL_WIDTH='575px';const DASH_MIN_COLUMN=340;" +
+    extractFn('js/rq_dashboard.js', 'isDashExpanded') +
+    extractFn('js/rq_dashboard.js', 'applyDashboardLayout') +
+    extractFn('js/rq_dashboard.js', 'toggleDashboardExpanded') +
+    '; return { isDashExpanded, applyDashboardLayout, toggleDashboardExpanded };')(
+    layoutStore, { getElementById: (id) => nodes[id] ?? null });
+
+  const panelNode = nodes['rq-dashboard'], bodyNode = nodes['rq-dashboard-body'], btnNode = nodes['rq-dashboard-expand'];
+
+  LY.applyDashboardLayout();
+  check('defaults to the narrow panel', panelNode.style.width, '575px');
+  check('defaults to a single column', bodyNode.style.display, 'flex');
+  check('button offers to expand', btnNode.textContent, 'open_in_full');
+
+  LY.toggleDashboardExpanded();
+  check('expands to the viewport', panelNode.style.width, '100vw');
+  check('cards flow into a grid', bodyNode.style.display, 'grid');
+  check('columns are responsive with a readable floor',
+        bodyNode.style.gridTemplateColumns, 'repeat(auto-fill, minmax(340px, 1fr))');
+  check('cards keep their own height', bodyNode.style.alignItems, 'start');
+  check('flexDirection is cleared so it cannot fight the grid', bodyNode.style.flexDirection, '');
+  check('button offers to shrink', btnNode.textContent, 'close_fullscreen');
+  check('the choice is persisted', layoutStore.getItem('rq-dashboard-expanded'), '1');
+
+  LY.toggleDashboardExpanded();
+  check('shrinks back to the panel', panelNode.style.width, '575px');
+  check('returns to a single column', bodyNode.style.display, 'flex');
+  check('gridTemplateColumns is cleared', bodyNode.style.gridTemplateColumns, '');
+  check('alignItems is cleared', bodyNode.style.alignItems, '');
+  check('flexDirection is restored', bodyNode.style.flexDirection, 'column');
+
+  // A saved preference must survive a fresh panel.
+  layoutStore.setItem('rq-dashboard-expanded', '1');
+  LY.applyDashboardLayout();
+  check('a saved expanded state is restored on open', bodyNode.style.display, 'grid');
+
+  // Missing nodes must not throw - the panel is built lazily.
+  const LY2 = new Function('localStorage', 'document',
+    "const DASH_EXPANDED_KEY='rq-dashboard-expanded';const DASH_PANEL_WIDTH='575px';const DASH_MIN_COLUMN=340;" +
+    extractFn('js/rq_dashboard.js', 'isDashExpanded') +
+    extractFn('js/rq_dashboard.js', 'applyDashboardLayout') +
+    '; return applyDashboardLayout;')(layoutStore, { getElementById: () => null });
+  let threw = false;
+  try { LY2(); } catch { threw = true; }
+  check('no panel yet is a no-op, not a throw', threw, false);
+
+  const dashSrc6 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('card reordering follows the layout axis',
+        /isDashExpanded\(\)\s*\?\s*e\.clientX/.test(dashSrc6), true);
+  check('both reorder handlers were updated',
+        (dashSrc6.match(/isDashExpanded\(\)\s*\n?\s*\?\s*e\.clientX/g) || []).length, 2);
+  check('the layout is applied when the panel opens',
+        /applyDashboardLayout\(\); \/\/ restore the saved/.test(dashSrc6), true);
+
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
 })();
