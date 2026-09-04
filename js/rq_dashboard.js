@@ -182,9 +182,10 @@
   const agentSectionCache = new Map();
   const AGENT_CACHE_TTL = 15 * 60 * 1000; // 15 minutes
   // The agent query asks for one page and does not sort, so anything past this cap
-  // is simply absent - and which records are absent is whatever order the API
-  // happened to return. Raised from 50, where cards were silently truncating; when
-  // it is still not enough the card says so rather than quietly showing less.
+  // is simply absent, and which records are absent is whatever order the API
+  // happened to return. Raised from 50, where cards were silently truncating.
+  // Nothing surfaces when it is exceeded - by request - so if records seem to be
+  // missing, this is the first thing to suspect.
   const AGENT_PAGE_SIZE = 200;
 
   const PREPS_SHEET_KEY   = 'rq-dashboard-preps-sheet-url';
@@ -4051,7 +4052,7 @@
     // on screen (e.g. reopening the panel) to avoid needless flicker.
     if (cached && !body.querySelector('.rq-card-row')) {
       prePopulateDetailCache(cfg, cached.items);
-      renderBuiltinRows(cardId, cached.items, cfg.module, cfg.icon, cached.total);
+      renderBuiltinRows(cardId, cached.items, cfg.module, cfg.icon);
     }
 
     // Hit the network only when forced or when the cache is stale/cold.
@@ -4078,13 +4079,9 @@
         const hidden = new Set(cfg.hidden);
         const keep = cfg.rowFilter ?? (() => true);
         const items = (r?.Items ?? []).filter(i => !hidden.has(i.Status) && keep(i));
-        // TotalItems counts everything matching the agent server-side, before the
-        // status and row filters above, so it answers "was the query truncated",
-        // not "how many rows are hidden".
-        const total = Number(r?.TotalItems);
         prePopulateDetailCache(cfg, items);
-        setCachedSection(cardId, { items, total, fetchedAt: Date.now() });
-        renderBuiltinRows(cardId, items, cfg.module, cfg.icon, total);
+        setCachedSection(cardId, { items, fetchedAt: Date.now() });
+        renderBuiltinRows(cardId, items, cfg.module, cfg.icon);
       })
       .catch(() => {
         // Leave stale data visible on a background-refresh failure; only a cold cache shows the error.
@@ -4096,7 +4093,7 @@
 
   // Shared renderer for My Orders / My Quotes. `apiItems` are raw API response objects.
   // `numberField` is the record-number field name on the API item (e.g. 'OrderNumber').
-  function renderBuiltinRows(cardId, apiItems, module, icon, totalAvailable) {
+  function renderBuiltinRows(cardId, apiItems, module, icon) {
     const body = document.getElementById('rq-card-body-' + cardId);
     if (!body) return;
     body.innerHTML = '';
@@ -4156,15 +4153,6 @@
     });
 
     if (itemTargets.length) fillRowItems(itemTargets, itemFetcher);
-
-    // Say so when the query hit the cap, rather than looking like the whole list.
-    if (Number.isFinite(totalAvailable) && totalAvailable > AGENT_PAGE_SIZE) {
-      const note = el('div', `
-        padding: 6px 14px 2px; font-size: 10px; color: #8a7a4a; font-style: italic;`);
-      note.textContent = `Showing the first ${AGENT_PAGE_SIZE} of ${totalAvailable} — ` +
-                         'narrow the card with a filter to see the rest.';
-      body.appendChild(note);
-    }
   }
 
   function loadMyOrders(forceRefresh = false) { loadAgentSection('myorders', forceRefresh); }

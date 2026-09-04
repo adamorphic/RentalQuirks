@@ -679,21 +679,11 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         /pagesize=' \+ AGENT_PAGE_SIZE \+ '/.test(dashSrc8), true);
   check('no hardcoded pagesize=50 remains on the agent query',
         /apiurl \+ '\?pagesize=50/.test(dashSrc8), false);
-  check('the notice is driven by the server total, not the rendered count',
-        /totalAvailable > AGENT_PAGE_SIZE/.test(dashSrc8), true);
-  check('the total is cached so a cached render can still report it',
-        /setCachedSection\(cardId, \{ items, total,/.test(dashSrc8), true);
-  check('the cached render passes it through',
-        /renderBuiltinRows\(cardId, cached\.items, cfg\.module, cfg\.icon, cached\.total\)/.test(dashSrc8), true);
-
-  // The guard condition itself, in isolation.
-  const CAP = Number(capMatch[1]);
-  const shows = (total) => Number.isFinite(total) && total > CAP;
-  check('under the cap shows no notice', shows(CAP - 1), false);
-  check('exactly the cap shows no notice', shows(CAP), false);
-  check('over the cap shows the notice', shows(CAP + 1), true);
-  check('a missing total shows no notice', shows(undefined), false);
-  check('a non-numeric total shows no notice', shows(Number('nope')), false);
+  // The truncation notice was removed by request, so nothing should be left
+  // threading a server total through the render path.
+  check('no truncation notice remains', /totalAvailable/.test(dashSrc8), false);
+  check('and its plumbing is gone with it',
+        /setCachedSection\(cardId, \{ items, total,/.test(dashSrc8), false);
 
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
