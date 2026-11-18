@@ -565,6 +565,10 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         bodyNode.style.gridTemplateColumns, 'repeat(auto-fill, minmax(340px, 1fr))');
   check('cards keep their own height', bodyNode.style.alignItems, 'start');
   check('flexDirection is cleared so it cannot fight the grid', bodyNode.style.flexDirection, '');
+  // Without content-sized rows, two rows taller than the viewport get squeezed and
+  // overflow:hidden cards spill into the row below.
+  check('rows size to their content', bodyNode.style.gridAutoRows, 'max-content');
+  check('rows pack to the top', bodyNode.style.alignContent, 'start');
   check('button offers to shrink', btnNode.textContent, 'close_fullscreen');
   check('the choice is persisted', layoutStore.getItem('rq-dashboard-expanded'), '1');
 
@@ -573,6 +577,8 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('returns to a single column', bodyNode.style.display, 'flex');
   check('gridTemplateColumns is cleared', bodyNode.style.gridTemplateColumns, '');
   check('alignItems is cleared', bodyNode.style.alignItems, '');
+  check('gridAutoRows is cleared', bodyNode.style.gridAutoRows, '');
+  check('alignContent is cleared', bodyNode.style.alignContent, '');
   check('flexDirection is restored', bodyNode.style.flexDirection, 'column');
 
   // A saved preference must survive a fresh panel.

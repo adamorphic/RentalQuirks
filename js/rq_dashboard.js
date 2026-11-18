@@ -1659,11 +1659,19 @@
       body.style.display = 'grid';
       body.style.gridTemplateColumns = `repeat(auto-fill, minmax(${DASH_MIN_COLUMN}px, 1fr))`;
       body.style.alignItems = 'start'; // each card keeps its own height
+      // Rows must size to their content. Cards are overflow:hidden, which lets a
+      // grid row shrink below the card's real height; with the body a fixed
+      // (viewport) height, two rows taller than the screen got squeezed and each
+      // card spilled into the row below. max-content rows let the body scroll.
+      body.style.gridAutoRows = 'max-content';
+      body.style.alignContent = 'start';
       body.style.flexDirection = '';
     } else {
       body.style.display = 'flex';
       body.style.flexDirection = 'column';
       body.style.gridTemplateColumns = '';
+      body.style.gridAutoRows = '';
+      body.style.alignContent = '';
       body.style.alignItems = '';
     }
 
