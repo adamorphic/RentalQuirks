@@ -243,6 +243,14 @@
     try { sessionStorage.removeItem(PREPS_SS_KEY); } catch {}
   }
 
+  // "Did a refresh bring back anything new?" A background refresh that returns
+  // identical data must not rebuild its card: a rebuild collapses any row the
+  // user has expanded and any "+N more" they opened, which on a timer would make
+  // the dashboard unusable to read.
+  function sameData(a, b) {
+    try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+  }
+
   // Floor plan: each cell's label → grid position (1-based row/col in a 3×3 grid)
   // Col 1 (rooms) is handled separately as a single spanning wrapper — see renderPrepsFloorPlan.
   const PREP_ROOM_CELLS  = ['Rm 2', 'Rm 1']; // top-to-bottom order in col 1
@@ -1304,6 +1312,8 @@
         // Rows assign style.background inline on hover, which would paint over a
         // tint, so the due-today marker is an inset shadow on the leading edge.
         '.rq-due-today { box-shadow: inset 3px 0 0 #e09820; }',
+        '@keyframes rq-spin-kf { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }',
+        '.rq-spin { animation: rq-spin-kf 0.6s ease-out 1; }',
       ].join('\n');
       document.head.appendChild(style);
     }
@@ -1364,8 +1374,27 @@
     expandBtn.addEventListener('mouseleave', () => { expandBtn.style.color = '#888'; expandBtn.style.background = ''; });
     expandBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleDashboardExpanded(); });
 
+    const refreshAllBtn = el('i', `
+      cursor: pointer; color: #888; font-size: 18px; line-height: 1;
+      padding: 4px 6px; border-radius: 4px;
+      transition: color 0.15s, background 0.15s;
+    `);
+    refreshAllBtn.className = 'material-icons';
+    refreshAllBtn.textContent = 'refresh';
+    refreshAllBtn.title = 'Refresh all cards';
+    refreshAllBtn.addEventListener('mouseenter', () => { refreshAllBtn.style.color = '#fff'; refreshAllBtn.style.background = '#333'; });
+    refreshAllBtn.addEventListener('mouseleave', () => { refreshAllBtn.style.color = '#888'; refreshAllBtn.style.background = ''; });
+    refreshAllBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // A brief spin, so the click visibly registered even when nothing changes.
+      refreshAllBtn.classList.remove('rq-spin');
+      void refreshAllBtn.offsetWidth;
+      refreshAllBtn.classList.add('rq-spin');
+      refreshAllCards();
+    });
+
     const headerBtns = el('div', 'display: flex; align-items: center; gap: 2px;');
-    headerBtns.append(expandBtn, closeBtn);
+    headerBtns.append(refreshAllBtn, expandBtn, closeBtn);
     header.append(title, headerBtns);
 
     // Search bar
@@ -1752,6 +1781,7 @@
       renderCards();
     }
     applyDashboardLayout(); // restore the saved width and columns before showing
+    startAutoRefresh();
     const panel = document.getElementById('rq-dashboard');
     const overlay = document.getElementById('rq-dashboard-overlay');
     overlay.style.opacity = '1';
@@ -1772,6 +1802,7 @@
     overlay.style.opacity = '0';
     overlay.style.pointerEvents = 'none';
     panel.style.transform = 'translateX(100%)';
+    stopAutoRefresh();
   }
 
   function togglePanel() {
@@ -2455,7 +2486,10 @@
 
     // Header order: drag, icon, title[flex:1], [filterBtn from addSectionFilter], cfgToggleBtn, collapseBtn
     // Builders insert sort before cfgToggleBtn and refresh before collapseBtn.
-    cardHeader.append(dragHandle, cardIcon, titleSpan);
+    const ageLabel = el('span', 'font-size: 10px; color: #4a4a4a; flex-shrink: 0; display: none;');
+    ageLabel.className = 'rq-card-age';
+    ageLabel.dataset.cardId = id;
+    cardHeader.append(dragHandle, cardIcon, titleSpan, ageLabel);
     const filterRow = id !== 'quicklinks' ? addSectionFilter(cardHeader, cardBody) : null;
     cardHeader.append(cfgToggleBtn, collapseBtn);
 
@@ -3848,14 +3882,137 @@
     if (visibleIds.has('bookmarks'))  loadBookmarks();
     if (visibleIds.has('recents'))    loadRecents();
     if (visibleIds.has('archive'))    loadArchiveItems();
-    if (visibleIds.has('myorders'))   loadMyOrders();
-    if (visibleIds.has('myquotes'))   loadMyQuotes();
-    if (visibleIds.has('mypos'))      loadMyPOs();
-    if (visibleIds.has('subrentals')) loadSubRentals();
-    if (visibleIds.has('preps'))      loadPreps();
+    refreshNetworkCards(false);
     loadCustomSections()
       .filter(s => visibleIds.has(s.id))
       .forEach(section => loadCustomSectionItems(section));
+    updateCardAges(); // cards served from cache never reach a loader's own update
+  }
+
+  // ── Refreshing ────────────────────────────────────────────────────
+  // Only these cards load from the network. The rest are built from local
+  // storage, change only through the user's own actions, and are rebuilt from
+  // scratch whenever loaded - so they are deliberately left out of timed
+  // refreshes, where a rebuild would collapse whatever the user had open.
+  const NETWORK_CARD_LOADERS = {
+    myorders:   (mode) => loadMyOrders(mode),
+    myquotes:   (mode) => loadMyQuotes(mode),
+    mypos:      (mode) => loadMyPOs(mode),
+    subrentals: (mode) => loadSubRentals(mode),
+    preps:      (mode) => loadPreps(mode),
+  };
+
+  // mode: false   - use cached data while it is fresh (opening the panel)
+  //       'background' - fetch regardless, redraw only cards whose data changed
+  //       true    - fetch and redraw everything (an explicit refresh)
+  function refreshNetworkCards(mode) {
+    const tabs = loadTabs();
+    if (!tabs) return;
+    const visible = new Set(getActiveTab(tabs).sections);
+    for (const [id, load] of Object.entries(NETWORK_CARD_LOADERS)) {
+      if (visible.has(id)) load(mode);
+    }
+  }
+
+  // The header refresh button: everything visible, from the source. Detail and
+  // line-item caches are dropped too, so badges, dates and item lists come back
+  // fresh as their rows redraw.
+  function refreshAllCards() {
+    detailCache.clear();
+    rowItemsCache.clear();
+    // The Preps cache itself is kept: a forced load replaces it anyway, and
+    // keeping it means the old schedule stays on screen instead of "Loading...".
+    RQ.sheets?.clearCache?.();
+    refreshNetworkCards(true);
+    const tabs = loadTabs();
+    if (!tabs) return;
+    const visible = new Set(getActiveTab(tabs).sections);
+    if (visible.has('quicklinks')) loadQuickLinks();
+    if (visible.has('bookmarks'))  loadBookmarks();
+    if (visible.has('recents'))    loadRecents();
+    if (visible.has('archive'))    loadArchiveItems();
+    loadCustomSections().filter(s => visible.has(s.id)).forEach(loadCustomSectionItems);
+  }
+
+  // Auto-refresh while the dashboard is open, so a full-screen dashboard left
+  // up as a working view stays current. Background mode means an unchanged card
+  // is never redrawn, so nothing the user has expanded snaps shut.
+  const AUTO_REFRESH_MS     = 3 * 60 * 1000;
+  const AGE_TICK_MS         = 30 * 1000;
+  const RETURN_REFRESH_GAP  = 60 * 1000; // coming back to the tab sooner than this does nothing
+  let autoRefreshTimer = null;
+  let ageTimer = null;
+  let lastAutoRefresh = 0;
+
+  function isPanelOpen() {
+    const p = document.getElementById('rq-dashboard');
+    return !!p && p.style.transform === 'translateX(0)';
+  }
+
+  function autoRefresh() {
+    if (!isPanelOpen() || document.visibilityState !== 'visible') return;
+    lastAutoRefresh = Date.now();
+    refreshNetworkCards('background');
+  }
+
+  function startAutoRefresh() {
+    lastAutoRefresh = Date.now();
+    if (!autoRefreshTimer) autoRefreshTimer = setInterval(autoRefresh, AUTO_REFRESH_MS);
+    if (!ageTimer) ageTimer = setInterval(updateCardAges, AGE_TICK_MS);
+  }
+
+  function stopAutoRefresh() {
+    clearInterval(autoRefreshTimer);
+    clearInterval(ageTimer);
+    autoRefreshTimer = ageTimer = null;
+  }
+
+  // Returning to the browser tab after a while: catch up straight away rather
+  // than waiting out the rest of the interval.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && isPanelOpen() &&
+        Date.now() - lastAutoRefresh > RETURN_REFRESH_GAP) {
+      autoRefresh();
+    }
+  });
+
+  // ── "Updated X ago" on card headers ───────────────────────────────
+  // How long each network card reuses its data before reloading on open; past
+  // this its age label turns amber.
+  function cardTtl(id) {
+    if (AGENT_SECTIONS[id]) return AGENT_CACHE_TTL;
+    if (id === 'subrentals') return SUBRENTAL_TTL;
+    if (id === 'preps')      return PREPS_CACHE_TTL;
+    return null;
+  }
+
+  // When a card's data was last fetched, or null for cards built locally.
+  function cardFetchedAt(id) {
+    if (AGENT_SECTIONS[id] || id === 'subrentals') return getCachedSection(id)?.fetchedAt ?? null;
+    if (id === 'preps') return getCachedPreps()?.fetchedAt ?? null;
+    return null;
+  }
+
+  function formatAge(ms) {
+    const mins = Math.floor(ms / 60000);
+    if (mins < 1)  return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    const hrs = Math.floor(mins / 60);
+    return hrs + 'h ago';
+  }
+
+  function updateCardAges() {
+    document.querySelectorAll('.rq-card-age').forEach(label => {
+      const id = label.dataset.cardId;
+      const at = cardFetchedAt(id);
+      if (!at) { label.style.display = 'none'; return; }
+      const age = Date.now() - at;
+      const ttl = cardTtl(id);
+      label.textContent = formatAge(age);
+      label.title = 'Updated ' + new Date(at).toLocaleTimeString();
+      label.style.color = ttl && age > ttl ? '#a0782a' : '#4a4a4a';
+      label.style.display = '';
+    });
   }
 
   // ── Built-in card loaders ──────────────────────────────────────────
@@ -4142,9 +4299,13 @@
         const hidden = new Set(cfg.hidden);
         const keep = cfg.rowFilter ?? (() => true);
         const items = (r?.Items ?? []).filter(i => !hidden.has(i.Status) && keep(i));
+        // forceRefresh === true is an explicit refresh and always redraws;
+        // 'background' redraws only if something actually changed.
+        const unchanged = forceRefresh !== true && cached && sameData(items, cached.items);
         prePopulateDetailCache(cfg, items);
         setCachedSection(cardId, { items, fetchedAt: Date.now() });
-        renderBuiltinRows(cardId, items, cfg.module, cfg.icon);
+        if (!unchanged) renderBuiltinRows(cardId, items, cfg.module, cfg.icon);
+        updateCardAges();
       })
       .catch(() => {
         // Leave stale data visible on a background-refresh failure; only a cold cache shows the error.
@@ -4448,8 +4609,10 @@
       }));
 
       const groups = groupSubRentalsByPickDate(perOrder.filter(g => g.items.length));
+      const unchanged = forceRefresh !== true && cached && sameData(groups, cached.groups);
       setCachedSection('subrentals', { groups, fetchedAt: Date.now() });
-      renderSubRentals(groups);
+      if (!unchanged) renderSubRentals(groups);
+      updateCardAges();
     } catch {
       // Leave stale data visible on a background refresh; only a cold card shows the error.
       if (!cached) body.innerHTML = placeholderHTML('Failed to load sub rentals');
@@ -4610,7 +4773,7 @@
 
     const refreshBtn = makeIconButton('refresh', {
       title: 'Refresh',
-      onClick: () => { clearPrepsCache(); loadPreps(); },
+      onClick: () => { clearPrepsCache(); RQ.sheets.clearCache?.(); loadPreps(true); },
     });
 
     const currentView = localStorage.getItem(PREPS_VIEW_KEY) || 'list';
@@ -4702,7 +4865,9 @@
 
     // Render the cached schedule immediately, but skip the re-render if rows are
     // already on screen to avoid needless flicker when reopening the panel.
-    if (cachedPreps && !body.querySelector('.rq-card-row')) {
+    // Prep rows don't carry .rq-card-row, so the old ".rq-card-row present?" test
+    // never matched and Preps redrew on every open. renderPreps marks the body.
+    if (cachedPreps && body.dataset.rqRendered !== '1') {
       renderPreps(cachedPreps.groups, cachedPreps.rwData);
     }
 
@@ -4720,8 +4885,11 @@
       const allOrderNos = [...new Set(groups.flatMap(g => g.rows.map(r => (r['Order No.'] || '').trim()).filter(Boolean)))];
       const rwData = await fetchOrdersByNumbers(allOrderNos);
 
+      const unchanged = forceRefresh !== true && cachedPreps &&
+        sameData({ g: groups, r: [...rwData] }, { g: cachedPreps.groups, r: [...cachedPreps.rwData] });
       setCachedPreps({ groups, rwData, fetchedAt: Date.now() });
-      renderPreps(groups, rwData);
+      if (!unchanged) renderPreps(groups, rwData);
+      updateCardAges();
     } catch {
       // Leave stale data visible on a background-refresh failure; only a cold cache shows the error.
       if (!cachedPreps) body.innerHTML = placeholderHTML('Failed to load preps');
@@ -4933,6 +5101,7 @@
   function renderPreps(groups, rwData) {
     if (!sheetsReady(document.getElementById('rq-card-body-preps'))) return;
     const body = document.getElementById('rq-card-body-preps');
+    if (body) body.dataset.rqRendered = '1'; // see the guard in loadPreps
     if (!body) return;
     body.innerHTML = '';
 

@@ -82,6 +82,13 @@
     return promise;
   };
 
+  /** Drops every cached tab, so the next read goes to Google. For an explicit
+   *  refresh - the 2-minute reuse is right for repeat renders, wrong when the
+   *  user has just asked for fresh data. */
+  RQ.sheets.clearCache = function () {
+    rowCache.clear();
+  };
+
   /**
    * Raw rows grouped per day, for callers that render the schedule by date.
    * Days with no rows are omitted.

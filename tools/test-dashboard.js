@@ -114,7 +114,7 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   console.log('module surface:');
   check('RQ.sheets exposes exactly what the Preps card uses',
         Object.keys(sb.window.RentalQuirks.sheets).sort(),
-        ['fetchPrepGroups', 'fetchPrepRows', 'fmtDate', 'getSheetIdFromUrl', 'windowDates']);
+        ['clearCache', 'fetchPrepGroups', 'fetchPrepRows', 'fmtDate', 'getSheetIdFromUrl', 'windowDates']);
   check('poller-era helpers stay removed',
         ['makeStatePruner', 'runIfLeader', 'sleep'].filter(n => declares(common, n)), []);
   check('rq_common keeps its long-standing helpers',
@@ -746,6 +746,103 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('no truncation notice remains', /totalAvailable/.test(dashSrc8), false);
   check('and its plumbing is gone with it',
         /setCachedSection\(cardId, \{ items, total,/.test(dashSrc8), false);
+
+
+  // -- Refreshing ---------------------------------------------------------------
+  console.log('refreshing:');
+  const R = new Function(
+    extractFn('js/rq_dashboard.js', 'sameData') +
+    extractFn('js/rq_dashboard.js', 'formatAge') +
+    '; return { sameData, formatAge };')();
+
+  // Change detection is what keeps background refreshes from collapsing rows.
+  check('identical data counts as unchanged', R.sameData([{ a: 1 }], [{ a: 1 }]), true);
+  check('a changed field counts as changed', R.sameData([{ a: 1 }], [{ a: 2 }]), false);
+  check('an added row counts as changed', R.sameData([1], [1, 2]), false);
+  check('reordered rows count as changed', R.sameData([1, 2], [2, 1]), false);
+  const cyc = {}; cyc.self = cyc;
+  check('unserialisable data counts as changed, never throws', R.sameData(cyc, cyc), false);
+
+  check('age under a minute', R.formatAge(30 * 1000), 'just now');
+  check('age in minutes', R.formatAge(4 * 60 * 1000 + 5000), '4m ago');
+  check('age in hours', R.formatAge(2 * 3600 * 1000 + 60000), '2h ago');
+
+  // refreshNetworkCards touches only visible network cards, passing the mode on.
+  const loaded = [];
+  const RN = new Function('NETWORK_CARD_LOADERS', 'loadTabs', 'getActiveTab',
+    extractFn('js/rq_dashboard.js', 'refreshNetworkCards') + '; return refreshNetworkCards;')(
+    Object.fromEntries(['myorders', 'myquotes', 'mypos', 'subrentals', 'preps']
+      .map(id => [id, (mode) => loaded.push([id, mode])])),
+    () => [{}], () => ({ sections: ['bookmarks', 'myorders', 'preps', 'custom-1'] }));
+  RN('background');
+  check('only visible network cards are refreshed',
+        loaded.map(l => l[0]), ['myorders', 'preps']);
+  check('and they receive the mode', loaded.map(l => l[1]), ['background', 'background']);
+
+  // autoRefresh does nothing unless the panel is open and the tab is visible.
+  const runAuto = (open, visibility) => {
+    const calls = [];
+    const fn = new Function('isPanelOpen', 'document', 'refreshNetworkCards',
+      'let lastAutoRefresh = 0;' + extractFn('js/rq_dashboard.js', 'autoRefresh') + '; return autoRefresh;')(
+      () => open, { visibilityState: visibility }, (m) => calls.push(m));
+    fn();
+    return calls;
+  };
+  check('auto-refresh runs in background mode when open and visible', runAuto(true, 'visible'), ['background']);
+  check('auto-refresh skips while the panel is closed', runAuto(false, 'visible'), []);
+  check('auto-refresh skips while the browser tab is hidden', runAuto(true, 'hidden'), []);
+
+  // Timers start once however often the panel opens, and stop cleanly.
+  const timers = [];
+  const TM = new Function('setInterval', 'clearInterval', 'autoRefresh', 'updateCardAges',
+    'const AUTO_REFRESH_MS=1;const AGE_TICK_MS=1;let autoRefreshTimer=null;let ageTimer=null;let lastAutoRefresh=0;' +
+    extractFn('js/rq_dashboard.js', 'startAutoRefresh') +
+    extractFn('js/rq_dashboard.js', 'stopAutoRefresh') +
+    '; return { startAutoRefresh, stopAutoRefresh };')(
+    (fn) => { timers.push('set'); return timers.length; }, () => timers.push('clear'), () => {}, () => {});
+  TM.startAutoRefresh(); TM.startAutoRefresh();
+  check('opening twice does not stack timers', timers.filter(t => t === 'set').length, 2);
+  TM.stopAutoRefresh();
+  check('closing clears both timers', timers.filter(t => t === 'clear').length, 2);
+  TM.startAutoRefresh();
+  check('reopening after close starts them again', timers.filter(t => t === 'set').length, 4);
+
+  // Age labels: shown for network cards, amber once older than the card's TTL,
+  // hidden for cards that never fetch.
+  const mkLabel = (id) => ({ dataset: { cardId: id }, style: {}, textContent: '', title: '' });
+  const ordersLbl = mkLabel('myorders'), staleLbl = mkLabel('subrentals'), localLbl = mkLabel('bookmarks');
+  const NOW_MS = Date.now();
+  const UA = new Function('document', 'cardFetchedAt', 'cardTtl', 'formatAge',
+    extractFn('js/rq_dashboard.js', 'updateCardAges') + '; return updateCardAges;')(
+    { querySelectorAll: () => [ordersLbl, staleLbl, localLbl] },
+    (id) => ({ myorders: NOW_MS - 2 * 60000, subrentals: NOW_MS - 30 * 60000 })[id] ?? null,
+    (id) => ({ myorders: 15 * 60000, subrentals: 10 * 60000 })[id] ?? null,
+    R.formatAge);
+  UA();
+  check('a network card shows its age', ordersLbl.textContent, '2m ago');
+  check('a fresh card is shown in grey', ordersLbl.style.color, '#4a4a4a');
+  check('a card past its TTL turns amber', staleLbl.style.color, '#a0782a');
+  check('a local-only card shows no age', localLbl.style.display, 'none');
+  check('the tooltip gives the exact time', /^Updated /.test(ordersLbl.title), true);
+
+  // Structural: each network loader redraws only on change, and only background
+  // mode may skip - an explicit refresh (true) must always redraw.
+  const dashSrc9 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('agent cards skip the redraw when unchanged',
+        /forceRefresh !== true && cached && sameData\(items, cached\.items\)/.test(dashSrc9), true);
+  check('sub rentals skip the redraw when unchanged',
+        /forceRefresh !== true && cached && sameData\(groups, cached\.groups\)/.test(dashSrc9), true);
+  check('preps skip the redraw when unchanged',
+        /forceRefresh !== true && cachedPreps &&\s*\n?\s*sameData\(/.test(dashSrc9), true);
+  check('preps detects its own rendered state', /body\.dataset\.rqRendered = '1'/.test(dashSrc9), true);
+  check('all three loaders actually gate their redraw on it',
+        (dashSrc9.match(/if \(!unchanged\) render(BuiltinRows|SubRentals|Preps)\(/g) || []).length, 3);
+  // Anchored to the call sites: a bare /startAutoRefresh\(\);/ also matches a
+  // commented-out call, which is exactly the regression this should catch.
+  check('timers start when the panel opens',
+        /applyDashboardLayout\(\); \/\/ restore[^\n]*\r?\n[ \t]*startAutoRefresh\(\);/.test(dashSrc9), true);
+  check('timers stop when the panel closes',
+        /translateX\(100%\)';\r?\n[ \t]*stopAutoRefresh\(\);/.test(dashSrc9), true);
 
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
