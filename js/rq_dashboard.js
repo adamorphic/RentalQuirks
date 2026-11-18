@@ -271,6 +271,66 @@
     return loc.trim().toUpperCase();
   }
 
+  // Every floor-plan cell a prep location names, in order and without repeats.
+  // The forms below are the ones actually used on the Daily Prep Schedule
+  // (surveyed across every daily tab, Jan-Nov 2026):
+  //   lists      "A, B"  "A,B"  "A+B"  "A & B"  "E/F"  "D&E"  "Rm 1 + A"  "D and E"
+  //   ranges     "A-C"  "D-F"   - the same jobs also appear as "A, B, C" / "D,E,F"
+  //   qualifiers "Rm 1 Front"  "Rm 1 Back"  "D - Right"  "D - Left"
+  //   rooms      "Rm 1"  "RM 1"  "Rm1"  "Rm 2 "
+  // A partly-recognised location still lands in the cells it does name. An empty
+  // result means nothing matched, and the job belongs under Other.
+  function prepLocationCells(loc, known) {
+    const raw = String(loc || '').trim();
+    if (!raw) return [];
+    const whole = normalizeLocation(raw);
+    if (known.has(whole)) return [whole];
+
+    const cells = [];
+    for (const part of raw.split(/\s*(?:&|,|\/|\+|\band\b)\s*/i).filter(Boolean)) {
+      // A hyphen between two bay letters is a range: "A-C" is A, B and C.
+      const range = part.match(/^([a-z])\s*-\s*([a-z])$/i);
+      if (range && known.has(range[1].toUpperCase()) && known.has(range[2].toUpperCase())) {
+        const a = range[1].toUpperCase().charCodeAt(0);
+        const b = range[2].toUpperCase().charCodeAt(0);
+        const step = a <= b ? 1 : -1;
+        for (let c = a; c !== b + step; c += step) {
+          const letter = String.fromCharCode(c);
+          if (known.has(letter)) cells.push(letter);
+        }
+        continue;
+      }
+      // Anywhere else a hyphen only separates a cell from a note: "D - Right".
+      for (const piece of part.split(/\s*-\s*/)) {
+        const cell = prepCellAtStart(piece, known);
+        if (cell) cells.push(cell);
+      }
+    }
+
+    // Run-together single-letter cells: "DE". Only when every letter is a cell,
+    // so an unrelated word can't be read as a list of bays.
+    if (!cells.length && /^[a-z]{2,}$/i.test(raw) &&
+        [...raw.toUpperCase()].every(ch => known.has(ch))) {
+      cells.push(...raw.toUpperCase());
+    }
+    return [...new Set(cells)];
+  }
+
+  // The cell a piece of location text starts with, ignoring a trailing note:
+  // "Rm 1 Front" is Rm 1, "D Right" is D. A lone word ("Right") is not a cell.
+  function prepCellAtStart(text, known) {
+    const exact = normalizeLocation(text);
+    if (known.has(exact)) return exact;
+    const room = text.match(/^\s*r(?:oo)?m\s*(\d+)\b/i);
+    if (room) {
+      const c = 'Rm ' + room[1];
+      return known.has(c) ? c : null;
+    }
+    const letter = text.match(/^\s*([a-z])(?:\s+\S|\s*$)/i);
+    if (letter && known.has(letter[1].toUpperCase())) return letter[1].toUpperCase();
+    return null;
+  }
+
   // In-flight requests, so several row features asking for the same record share one
   // fetch instead of racing. Rows ask more than once (the due badge and the date
   // range both need the record), and a card can hold 50 rows.
@@ -5010,10 +5070,33 @@
     const byLocation = new Map();
     PREP_ROOM_CELLS.forEach(label => byLocation.set(label, []));
     PREP_FLOOR_CELLS.forEach(cell => byLocation.set(cell.label, []));
+    const known = new Set(byLocation.keys());
+    const cellsFor = new Map(); // row -> the cells it occupies
     rows.forEach(row => {
-      const norm = normalizeLocation(row['Prep Location'] || '');
-      if (byLocation.has(norm)) byLocation.get(norm).push(row);
+      const cells = prepLocationCells(row['Prep Location'], known);
+      cellsFor.set(row, cells);
+      cells.forEach(c => byLocation.get(c).push(row));
     });
+    // A job in several cells carries a tag naming all of them, so two copies
+    // read as one job across bays rather than two jobs.
+    const placeItem = (prepRow) => {
+      const item = buildFloorPlanPrepItem(prepRow, rwData, detailArea);
+      const cells = cellsFor.get(prepRow) || [];
+      const written = String(prepRow['Prep Location'] || '').trim();
+      // Several cells: name them all. One cell with a note ("Rm 1 Front",
+      // "D - Right"): keep the note, since which side of the bay is useful.
+      const tagText = cells.length > 1 ? cells.join(' + ')
+        : (cells.length === 1 && normalizeLocation(written) !== cells[0]) ? written
+        : null;
+      if (tagText) {
+        const tag = el('div', `
+          font-size: 9px; font-weight: 700; letter-spacing: 0.06em;
+          color: #8a9a5a; margin-top: 2px;`, tagText);
+        tag.title = cells.length > 1 ? 'Spans ' + cells.join(', ') : 'Written as "' + written + '"';
+        item.appendChild(tag);
+      }
+      return item;
+    };
 
     const grid = el('div', `
       display: grid;
@@ -5048,7 +5131,7 @@
         text-transform: uppercase; color: ${occupied ? '#5a9a5a' : '#444'};
         padding: 5px 10px 3px;
       `, label));
-      preps.forEach(prepRow => cell.appendChild(buildFloorPlanPrepItem(prepRow, rwData, detailArea)));
+      preps.forEach(prepRow => cell.appendChild(placeItem(prepRow)));
       roomWrapper.appendChild(cell);
     });
     grid.appendChild(roomWrapper);
@@ -5073,16 +5156,13 @@
         padding: 5px 10px 3px;
       `, label));
 
-      preps.forEach(prepRow => cell.appendChild(buildFloorPlanPrepItem(prepRow, rwData, detailArea)));
+      preps.forEach(prepRow => cell.appendChild(placeItem(prepRow)));
 
       grid.appendChild(cell);
     });
 
     // Unplaced preps (location not recognized or blank)
-    const unplaced = rows.filter(row => {
-      const norm = normalizeLocation(row['Prep Location'] || '');
-      return !byLocation.has(norm);
-    });
+    const unplaced = rows.filter(row => !(cellsFor.get(row) || []).length);
 
     container.appendChild(grid);
     container.appendChild(detailArea);

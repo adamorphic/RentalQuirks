@@ -845,6 +845,68 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         /translateX\(100%\)';\r?\n[ \t]*stopAutoRefresh\(\);/.test(dashSrc9), true);
 
 
+  // -- Preps: jobs spanning several floor-plan cells ---------------------------
+  // The sheet writes a job across bays however its author likes; each form must
+  // land in every cell it names, and only genuinely unknown locations go to Other.
+  console.log('prep locations:');
+  const PL = new Function(
+    extractFn('js/rq_dashboard.js', 'normalizeLocation') +
+    extractFn('js/rq_dashboard.js', 'prepLocationCells') +
+    extractFn('js/rq_dashboard.js', 'prepCellAtStart') +
+    '; return prepLocationCells;')();
+  const KNOWN = new Set(['Rm 2', 'Rm 1', 'C', 'F', 'B', 'E', 'A', 'D']);
+  const loc = (s) => PL(s, KNOWN);
+
+  check('a single cell', loc('D'), ['D']);
+  check('lowercase is fine', loc('d'), ['D']);
+  check('a room by name', loc('Rm 1'), ['Rm 1']);
+  check('D&E', loc('D&E'), ['D', 'E']);
+  check('D & E', loc('D & E'), ['D', 'E']);
+  check('D/E', loc('D/E'), ['D', 'E']);
+  check('D + E', loc('D + E'), ['D', 'E']);
+  check('D, E', loc('D, E'), ['D', 'E']);
+  check('D and E', loc('D and E'), ['D', 'E']);
+  check('D-E', loc('D-E'), ['D', 'E']);
+  check('run-together DE', loc('DE'), ['D', 'E']);
+  check('order is kept as written', loc('E&D'), ['E', 'D']);
+  check('three bays', loc('A/B/C'), ['A', 'B', 'C']);
+  check('both rooms', loc('Rm 1 & Rm 2'), ['Rm 1', 'Rm 2']);
+  check('room spellings mix', loc('room1/rm2'), ['Rm 1', 'Rm 2']);
+  check('a room and a bay', loc('Rm 1 & A'), ['Rm 1', 'A']);
+  check('repeats collapse', loc('D&D'), ['D']);
+  check('a partly-known location keeps what it can', loc('D & Z'), ['D']);
+  // Every spelling found across the sheet's daily tabs, Jan-Nov 2026.
+  const SEEN = {
+    'D': ['D'], 'Rm 2': ['Rm 2'], 'A': ['A'], 'Rm 1': ['Rm 1'], 'F': ['F'], 'C': ['C'],
+    'E': ['E'], 'B': ['B'], 'RM 2': ['Rm 2'], 'Rm 1 + A': ['Rm 1', 'A'], 'A, B': ['A', 'B'],
+    'Rm1': ['Rm 1'], 'A, B, C': ['A', 'B', 'C'], 'Rm2': ['Rm 2'], 'A-C': ['A', 'B', 'C'],
+    'Rm 2 + C': ['Rm 2', 'C'], 'E, F': ['E', 'F'], 'D-F': ['D', 'E', 'F'], 'A,B': ['A', 'B'],
+    'D,E,F': ['D', 'E', 'F'], 'RM 1': ['Rm 1'], 'Rm 1 Front': ['Rm 1'], 'Rm 1 Back': ['Rm 1'],
+    'D, E': ['D', 'E'], 'A+B': ['A', 'B'], 'C+B': ['C', 'B'], 'D + E': ['D', 'E'],
+    'B + C ': ['B', 'C'], 'A & B': ['A', 'B'], 'D, E, F': ['D', 'E', 'F'],
+    'D - Right': ['D'], 'D - Left': ['D'], 'E/F': ['E', 'F'], 'E & F': ['E', 'F'],
+    'Rm 2 ': ['Rm 2'], 'B, C': ['B', 'C'], 'D&E': ['D', 'E'],
+  };
+  const misread = Object.entries(SEEN).filter(([w, want]) => JSON.stringify(loc(w)) !== JSON.stringify(want));
+  check('every spelling used on the real sheet lands where it should', misread.map(([w]) => w), []);
+  check('a hyphen between bays is a range', loc('A-C'), ['A', 'B', 'C']);
+  check('a spaced range works too', loc('D - F'), ['D', 'E', 'F']);
+  check('a reversed range still covers the bays', loc('C-A'), ['C', 'B', 'A']);
+  check('a hyphen before a note is not a range', loc('D - Right'), ['D']);
+  check('a lone note word is not a cell', loc('Right'), []);
+  check('unknown goes to Other', loc('Z'), []);
+  check('blank goes to Other', loc(''), []);
+  check('missing goes to Other', loc(undefined), []);
+  check('a word is not read as bays unless every letter is one', loc('DOCK'), []);
+  check('a bare "and" is nothing', loc('and'), []);
+
+  const dashSrc10 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('both cell kinds place through the multi-cell path',
+        (dashSrc10.match(/cell\.appendChild\(placeItem\(prepRow\)\)/g) || []).length, 2);
+  check('Other uses the same parse, so nothing is placed twice or lost',
+        /const unplaced = rows\.filter\(row => !\(cellsFor\.get\(row\)/.test(dashSrc10), true);
+
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
 })();
