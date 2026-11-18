@@ -907,6 +907,142 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         /const unplaced = rows\.filter\(row => !\(cellsFor\.get\(row\)/.test(dashSrc10), true);
 
 
+  // -- "What changed" markers --------------------------------------------------
+  console.log('change markers:');
+  const dashSrc11 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  const constBlock = dashSrc11.slice(dashSrc11.indexOf('  const CHANGE_GROUPS = ['),
+                                     dashSrc11.indexOf('  let seenCache = null;'));
+  const CH = new Function(constBlock +
+    extractFn('js/rq_dashboard.js', 'normChangeValue') +
+    extractFn('js/rq_dashboard.js', 'changeSnapshot') +
+    extractFn('js/rq_dashboard.js', 'diffSnapshots') +
+    extractFn('js/rq_dashboard.js', 'summarizeChanges') +
+    extractFn('js/rq_dashboard.js', 'describeChanges') +
+    '; return { normChangeValue, changeSnapshot, diffSnapshots, summarizeChanges, describeChanges };')();
+
+  const snap = CH.changeSnapshot(
+    { Status: 'CONFIRMED', Description: ' BURGER KING ', GrandTotal: 1320, Unrelated: 'x' },
+    { EstimatedStartDate: '2026-09-04T00:00:00', EstimatedStopDate: '2026-09-18' });
+  check('snapshot keeps only tracked fields',
+        Object.keys(snap).sort(), ['Description', 'EstimatedStartDate', 'EstimatedStopDate', 'GrandTotal', 'Status']);
+  check('dates compare by day', snap.EstimatedStartDate, '2026-09-04');
+  check('money compares to the cent', snap.GrandTotal, '1320.00');
+  check('text is trimmed', snap.Description, 'BURGER KING');
+  check('detail fills in what the list row lacks',
+        CH.changeSnapshot({ Status: 'A' }, { PickDate: '2026-09-04' }).PickDate, '2026-09-04');
+
+  const base = { Status: 'QUOTE', EstimatedStopDate: '2026-09-18', Description: 'X', DateStamp: 't1' };
+  check('nothing changed -> no marker', CH.diffSnapshots(base, { ...base }), []);
+  const moved = CH.diffSnapshots(base, { ...base, EstimatedStopDate: '2026-09-20' });
+  check('a moved date is reported', moved.map(c => [c.group, c.from, c.to]), [['dates', '2026-09-18', '2026-09-20']]);
+  check('a status change is reported',
+        CH.diffSnapshots(base, { ...base, Status: 'CONFIRMED' }).map(c => c.group), ['status']);
+  check('a field only one side has is not a change',
+        CH.diffSnapshots({ Status: 'A' }, { Status: 'A', PickDate: '2026-09-04' }), []);
+  check('an edit stamp alone reads as "edited"',
+        CH.diffSnapshots(base, { ...base, DateStamp: 't2' }).map(c => c.group), ['edited']);
+  check('a real change outranks the bare edit stamp',
+        CH.diffSnapshots(base, { ...base, DateStamp: 't2', Status: 'X' }).map(c => c.group), ['status']);
+
+  check('status names the new status', CH.summarizeChanges([{ group: 'status', to: 'CONFIRMED' }]), '→ CONFIRMED');
+  check('dates read as moved', CH.summarizeChanges([{ group: 'dates' }, { group: 'dates' }]), 'dates moved');
+  check('several changes are listed once each',
+        CH.summarizeChanges([{ group: 'dates' }, { group: 'status', to: 'CLOSED' }, { group: 'dates' }]),
+        'dates moved, → CLOSED');
+  check('the tooltip shows old and new',
+        CH.describeChanges([{ group: 'dates', field: 'EstimatedStopDate', from: '2026-09-18', to: '2026-09-20' }]),
+        'EstimatedStopDate: 2026-09-18 → 2026-09-20');
+
+  // The whole lifecycle, run for real against a fake row and storage.
+  const seenStore = storageProxy();
+  const detail = new Map();
+  const mkFakeRow = () => {
+    const r = { children: [{}, {}], isConnected: true, captured: [],
+      insertBefore(n) { r.children.splice(2, 0, n); n.remove = () => { const i = r.children.indexOf(n); if (i >= 0) r.children.splice(i, 1); }; },
+      addEventListener(t, fn, cap) { if (t === 'click' && cap) r.captured.push(fn); },
+      click() { r.captured.forEach(fn => fn()); } };
+    return r;
+  };
+  const fakeElSimple = (tag, css, text) => ({ tag, textContent: text ?? '', title: '', className: '' });
+  const mkAttach = () => new Function('localStorage', 'el', 'detailCache', 'fetchRecordDetail',
+    "const SEEN_KEY='rq-dashboard-seen-v1';const SEEN_PRUNE_MS=1e12;const SEEN_TOUCH_MS=864e5;" +
+    constBlock + 'let seenCache = null;' +
+    ['loadSeen', 'saveSeen', 'normChangeValue', 'changeSnapshot', 'diffSnapshots', 'summarizeChanges',
+     'describeChanges', 'attachChangeMarker'].map(n => extractFn('js/rq_dashboard.js', n)).join('') +
+    '; return attachChangeMarker;')(seenStore, fakeElSimple, detail, () => new Promise(() => {}));
+  const badgeOf = (r) => r.children.find(c => c.className === 'rq-change-badge');
+
+  let rowA = mkFakeRow();
+  mkAttach()(rowA, 'Order', 'LA1', { Status: 'QUOTE', Description: 'JOB' });
+  check('first sighting shows no marker', badgeOf(rowA), undefined);
+  check('but records a baseline', !!JSON.parse(seenStore.getItem('rq-dashboard-seen-v1'))['Order:LA1'], true);
+
+  rowA = mkFakeRow();
+  mkAttach()(rowA, 'Order', 'LA1', { Status: 'CONFIRMED', Description: 'JOB' });
+  check('a later change shows a marker', badgeOf(rowA)?.textContent, '● → CONFIRMED');
+
+  rowA.click();
+  check('opening the record clears the marker', badgeOf(rowA), undefined);
+  rowA = mkFakeRow();
+  mkAttach()(rowA, 'Order', 'LA1', { Status: 'CONFIRMED', Description: 'JOB' });
+  check('and it stays cleared on the next render', badgeOf(rowA), undefined);
+
+  detail.set('Order:LA1', { data: { record: { EstimatedStopDate: '2026-09-18' } }, fetchedAt: 1 });
+  rowA = mkFakeRow();
+  mkAttach()(rowA, 'Order', 'LA1', { Status: 'CONFIRMED', Description: 'JOB' });
+  check('a newly visible field joins the baseline unflagged', badgeOf(rowA), undefined);
+  detail.set('Order:LA1', { data: { record: { EstimatedStopDate: '2026-09-25' } }, fetchedAt: 2 });
+  rowA = mkFakeRow();
+  mkAttach()(rowA, 'Order', 'LA1', { Status: 'CONFIRMED', Description: 'JOB' });
+  check('and a later change to it is flagged', badgeOf(rowA)?.textContent, '● dates moved');
+
+  check('markers are attached to agent rows',
+        /attachChangeMarker\(row, module, recordNumber, _raw\);/.test(dashSrc11), true);
+  check('a changed list row drops its stale detail',
+        /prev !== JSON\.stringify\(i\)\) detailCache\.delete/.test(dashSrc11), true);
+
+  // -- Today card and the shared fetchers -----------------------------------------
+  console.log('today card:');
+  const sent = [];
+  const FW = new Function('window', 'fetch', 'RW_URL', 'rwHeaders', 'SUBRENTAL_SKIP_STATUS',
+    extractFn('js/rq_dashboard.js', 'fetchOrdersWhere') + '; return fetchOrdersWhere;')(
+    { OrderController: { apiurl: 'api/v1/order' } },
+    (url) => { sent.push(decodeURIComponent(url.split('filter=')[1])); return Promise.resolve({ ok: true,
+      json: () => Promise.resolve({ Items: [{ OrderNumber: 'A', Status: 'CONFIRMED' }, { OrderNumber: 'B', Status: 'CANCELLED' }] }) }); },
+    '', () => ({}), new Set(['CANCELLED', 'CLOSED', 'VOID']));
+  const fwOut = await FW([{ Field: 'EstimatedStartDate', Op: '=', Value: '2026-11-18' }]);
+  check('one condition is sent as a plain object', sent[0].startsWith('{'), true);
+  await FW([{ Field: 'PickDate', Op: '>=', Value: 'a' }, { Field: 'PickDate', Op: '<=', Value: 'b' }]);
+  check('several conditions are sent as an array', sent[1].startsWith('['), true);
+  check('cancelled and closed orders are dropped', fwOut.map(o => o.OrderNumber), ['A']);
+
+  const asked = [];
+  const FU = new Function('fetchOrdersWhere', 'fetchOrderSubItems', 'mapWithLimit', 'subItemNeedsSourcing',
+    'SUBRENTAL_CONCURRENCY', 'ymdLocal',
+    extractFn('js/rq_dashboard.js', 'fetchUnsourcedSubRentals') + '; return fetchUnsourcedSubRentals;')(
+    async (f) => { asked.push(f); return [{ OrderId: 1 }, { OrderId: 2 }]; },
+    async (id) => id === 1 ? [{ Vendor: '', PurchaseOrderNumber: '' }] : [{ Vendor: 'V', PurchaseOrderNumber: 'P' }],
+    async (items, n, fn) => Promise.all(items.map(fn)),
+    (r) => !r.Vendor || !r.PurchaseOrderNumber, 5, (d) => d.toLocaleDateString('en-CA'));
+  const fuOut = await FU(new Date(2026, 10, 18), new Date(2026, 10, 20));
+  check('the pick-date window is sent as a range',
+        asked[0].map(f => f.Op + f.Value), ['>=2026-11-18', '<=2026-11-20']);
+  check('orders with nothing to source are dropped', fuOut.map(g => g.order.OrderId), [1]);
+
+  const SL = new Function(extractFn('js/rq_dashboard.js', 'slimOrder') + '; return slimOrder;')();
+  check('the cached order shape is small',
+        Object.keys(SL({ OrderId: 1, OrderNumber: 'A', Description: 'D', Agent: 'X', CustomerName: 'C', PickDate: 'p', Huge: 'y' })).sort(),
+        ['Agent', 'Customer', 'Description', 'OrderId', 'OrderNumber', 'PickDate']);
+
+  check("yesterday's Today cache is never treated as fresh",
+        /const sameDay = !!cached && cached\.day === day;/.test(dashSrc11), true);
+  check('one failing source does not blank the rest',
+        /const settle = \(p\) => p\.then\(v => v, \(\) => undefined\);/.test(dashSrc11), true);
+  check('Today is auto-refreshed', /today:\s+\(mode\) => loadToday\(mode\)/.test(dashSrc11), true);
+  check('Sub Rentals now uses the shared pipeline',
+        /groupSubRentalsByPickDate\(await fetchUnsourcedSubRentals\(from, to\)\)/.test(dashSrc11), true);
+
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
 })();

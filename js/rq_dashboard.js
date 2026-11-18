@@ -10,7 +10,7 @@
   const ARCHIVE_KEY         = 'rq-dashboard-archive';
   const TABS_KEY            = 'rq-dashboard-tabs';
   const ACTIVE_TAB_KEY      = 'rq-dashboard-active-tab';
-  const BUILTIN_IDS         = ['quicklinks', 'bookmarks', 'recents', 'archive', 'myorders', 'myquotes', 'mypos', 'subrentals', 'preps'];
+  const BUILTIN_IDS         = ['today', 'quicklinks', 'bookmarks', 'recents', 'archive', 'myorders', 'myquotes', 'mypos', 'subrentals', 'preps'];
   const MY_ORDERS_AGENT_KEY = 'rq-dashboard-my-orders-agent';
   const MY_QUOTES_AGENT_KEY   = 'rq-dashboard-my-quotes-agent';
   const MY_QUOTES_DUE_KEY     = 'rq-dashboard-my-quotes-due-field'; // 'start' | 'stop'
@@ -3759,6 +3759,7 @@
     myorders:   () => buildAgentCard('myorders'),
     myquotes:   () => buildAgentCard('myquotes'),
     mypos:      () => buildAgentCard('mypos'),
+    today:      () => buildTodayCard(),
     subrentals: () => buildSubRentalsCard(),
     preps:      () => buildPrepsCard(),
   };
@@ -3834,6 +3835,7 @@
     { id: 'myorders',   label: 'My Orders',      icon: 'assignment'    },
     { id: 'myquotes',   label: 'My Quotes',      icon: 'request_quote' },
     { id: 'mypos',      label: 'My POs',         icon: 'shopping_cart' },
+    { id: 'today',      label: 'Today',          icon: 'today'         },
     { id: 'subrentals', label: 'Sub Rentals',    icon: 'inventory_2'   },
     { id: 'preps',      label: 'Preps',          icon: 'event_note'    },
   ];
@@ -3959,6 +3961,7 @@
     myquotes:   (mode) => loadMyQuotes(mode),
     mypos:      (mode) => loadMyPOs(mode),
     subrentals: (mode) => loadSubRentals(mode),
+    today:      (mode) => loadToday(mode),
     preps:      (mode) => loadPreps(mode),
   };
 
@@ -4042,13 +4045,14 @@
   function cardTtl(id) {
     if (AGENT_SECTIONS[id]) return AGENT_CACHE_TTL;
     if (id === 'subrentals') return SUBRENTAL_TTL;
+    if (id === 'today')      return TODAY_TTL;
     if (id === 'preps')      return PREPS_CACHE_TTL;
     return null;
   }
 
   // When a card's data was last fetched, or null for cards built locally.
   function cardFetchedAt(id) {
-    if (AGENT_SECTIONS[id] || id === 'subrentals') return getCachedSection(id)?.fetchedAt ?? null;
+    if (AGENT_SECTIONS[id] || id === 'subrentals' || id === 'today') return getCachedSection(id)?.fetchedAt ?? null;
     if (id === 'preps') return getCachedPreps()?.fetchedAt ?? null;
     return null;
   }
@@ -4361,6 +4365,13 @@
         const items = (r?.Items ?? []).filter(i => !hidden.has(i.Status) && keep(i));
         // forceRefresh === true is an explicit refresh and always redraws;
         // 'background' redraws only if something actually changed.
+        if (cached) {
+          const before = new Map((cached.items || []).map(i => [i[cfg.numberField], JSON.stringify(i)]));
+          for (const i of items) {
+            const prev = before.get(i[cfg.numberField]);
+            if (prev !== undefined && prev !== JSON.stringify(i)) detailCache.delete(cfg.module + ':' + i[cfg.numberField]);
+          }
+        }
         const unchanged = forceRefresh !== true && cached && sameData(items, cached.items);
         prePopulateDetailCache(cfg, items);
         setCachedSection(cardId, { items, fetchedAt: Date.now() });
@@ -4377,6 +4388,156 @@
 
   // Shared renderer for My Orders / My Quotes. `apiItems` are raw API response objects.
   // `numberField` is the record-number field name on the API item (e.g. 'OrderNumber').
+  // ── "What changed" markers ─────────────────────────────────────────
+  // A row gets a small marker when its record has changed since you last looked
+  // at it: "● dates moved", "● → CONFIRMED". Opening or expanding the record
+  // counts as looking, and clears it.
+  //
+  // "Last looked" is a per-record snapshot of the fields below, kept in
+  // localStorage. The first sighting of a record is recorded silently, so the
+  // feature starts quiet rather than flagging everything on day one. Fields a
+  // snapshot never had (dates usually arrive later, from the detail fetch) join
+  // it unflagged, so only real edits after that point are reported.
+  const SEEN_KEY      = 'rq-dashboard-seen-v1';
+  const SEEN_PRUNE_MS = 60 * 24 * 60 * 60 * 1000; // forget records not listed for 60 days
+  const SEEN_TOUCH_MS = 24 * 60 * 60 * 1000;      // refresh a record's last-listed time daily
+  const CHANGE_GROUPS = [
+    { label: 'status',   fields: ['Status'] },
+    { label: 'dates',    fields: ['PickDate', 'EstimatedStartDate', 'EstimatedStopDate'], kind: 'date' },
+    { label: 'renamed',  fields: ['Description'] },
+    { label: 'customer', fields: ['Customer', 'CustomerName', 'Deal'] },
+    { label: 'vendor',   fields: ['Vendor'] },
+    { label: 'total',    fields: ['GrandTotal', 'Total', 'SubTotal'], kind: 'money' },
+  ];
+  // Generic edit stamps: if nothing above changed but one of these did, the record
+  // was still edited - say so rather than stay silent.
+  const EDIT_STAMP_FIELDS = ['ModifiedDateTime', 'DateStamp'];
+  const CHANGE_LABELS = {
+    dates: 'dates moved', renamed: 'renamed', customer: 'customer changed',
+    vendor: 'vendor changed', total: 'total changed', edited: 'edited',
+  };
+
+  let seenCache = null;
+  function loadSeen() {
+    if (seenCache) return seenCache;
+    try { seenCache = JSON.parse(localStorage.getItem(SEEN_KEY) || '{}'); }
+    catch { seenCache = {}; }
+    return seenCache;
+  }
+  function saveSeen() {
+    try { localStorage.setItem(SEEN_KEY, JSON.stringify(seenCache || {})); } catch {}
+  }
+  function pruneSeen() {
+    const seen = loadSeen();
+    const cutoff = Date.now() - SEEN_PRUNE_MS;
+    let dropped = false;
+    for (const k of Object.keys(seen)) {
+      if (!(seen[k]?.at > cutoff)) { delete seen[k]; dropped = true; }
+    }
+    if (dropped) saveSeen();
+  }
+
+  function normChangeValue(v, kind) {
+    if (v === undefined || v === null) return '';
+    if (kind === 'date') return String(v).slice(0, 10);
+    if (kind === 'money') { const n = Number(v); return Number.isFinite(n) ? n.toFixed(2) : String(v); }
+    return String(v).trim();
+  }
+
+  // The comparable fields of a record, from the list row plus any full detail
+  // already fetched for it (which is where the dates usually are).
+  function changeSnapshot(listItem, detailRecord) {
+    const src = { ...(listItem || {}), ...(detailRecord || {}) };
+    const snap = {};
+    for (const g of CHANGE_GROUPS) {
+      for (const f of g.fields) if (src[f] !== undefined) snap[f] = normChangeValue(src[f], g.kind);
+    }
+    for (const f of EDIT_STAMP_FIELDS) if (src[f] !== undefined) snap[f] = String(src[f]);
+    return snap;
+  }
+
+  // What differs between a seen snapshot and the current one. Only fields both
+  // sides have are compared; one entry per changed field.
+  function diffSnapshots(seen, cur) {
+    const out = [];
+    for (const g of CHANGE_GROUPS) {
+      for (const f of g.fields) {
+        if (f in seen && f in cur && seen[f] !== cur[f]) out.push({ group: g.label, field: f, from: seen[f], to: cur[f] });
+      }
+    }
+    if (!out.length && EDIT_STAMP_FIELDS.some(f => f in seen && f in cur && seen[f] !== cur[f])) {
+      out.push({ group: 'edited' });
+    }
+    return out;
+  }
+
+  // "● dates moved, → CONFIRMED". A status change names the new status, since
+  // that is usually the thing worth knowing.
+  function summarizeChanges(changes) {
+    const parts = [];
+    for (const c of changes) {
+      const text = c.group === 'status' ? '→ ' + (c.to || 'blank') : CHANGE_LABELS[c.group];
+      if (text && !parts.includes(text)) parts.push(text);
+    }
+    return parts.join(', ');
+  }
+
+  function describeChanges(changes) {
+    return changes.map(c => c.field ? `${c.field}: ${c.from || '(blank)'} → ${c.to || '(blank)'}`
+                                    : 'Edited since you last looked').join('\n');
+  }
+
+  function attachChangeMarker(row, module, recordNumber, listItem) {
+    if (!module || !recordNumber) return;
+    const key = module + ':' + recordNumber;
+    let badge = null;
+    const current = () => changeSnapshot(listItem, detailCache.get(key)?.data?.record);
+
+    const paint = () => {
+      if (!row.isConnected && badge) return;
+      const seen = loadSeen();
+      const snap = current();
+      const entry = seen[key];
+      if (!entry) { // first sighting: record it, flag nothing
+        seen[key] = { f: snap, at: Date.now() };
+        saveSeen();
+        return;
+      }
+      let dirty = false;
+      for (const [f, v] of Object.entries(snap)) {
+        if (!(f in entry.f)) { entry.f[f] = v; dirty = true; } // newly visible field joins unflagged
+      }
+      if (Date.now() - (entry.at || 0) > SEEN_TOUCH_MS) { entry.at = Date.now(); dirty = true; }
+      if (dirty) saveSeen();
+
+      const changes = diffSnapshots(entry.f, snap);
+      badge?.remove();
+      badge = null;
+      if (!changes.length) return;
+      badge = el('span', `
+        font-size: 10px; font-weight: 600; color: #7ab8e8; background: #182838;
+        border: 1px solid #24405a; border-radius: 3px; padding: 0 5px; margin-top: 2px;
+        flex-shrink: 0; white-space: nowrap; cursor: pointer;`, '● ' + summarizeChanges(changes));
+      badge.className = 'rq-change-badge';
+      badge.title = describeChanges(changes) + '\n\nOpen or expand the record to clear.';
+      row.insertBefore(badge, row.children[2] || null);
+    };
+
+    paint();
+    // Dates usually come from the detail fetch the due badge already makes; the
+    // in-flight dedup means asking again costs nothing.
+    fetchRecordDetail(module, recordNumber).then(paint).catch(() => {});
+
+    // Capture phase: clicking the record's name stops propagation, but opening it
+    // is exactly "looking at it", so it must still count.
+    row.addEventListener('click', () => {
+      loadSeen()[key] = { f: current(), at: Date.now() };
+      saveSeen();
+      badge?.remove();
+      badge = null;
+    }, true);
+  }
+
   function renderBuiltinRows(cardId, apiItems, module, icon) {
     const body = document.getElementById('rq-card-body-' + cardId);
     if (!body) return;
@@ -4409,6 +4570,7 @@
 
     const sort = getBuiltinSort(cardId);
     if (sort) sortItemsInPlace(sortable, sort.field, sort.dir);
+    pruneSeen();
 
     sortable.forEach((desc, idx) => {
       const { primary, secondary, sub, recordNumber, _raw } = desc;
@@ -4426,6 +4588,7 @@
       );
       row.dataset.rowIndex = idx;
       body.appendChild(row);
+      attachChangeMarker(row, module, recordNumber, _raw);
 
       if (itemFetcher && idField && _raw[idField]) {
         // Sibling of the row, not a child: the row itself is a single flex line.
@@ -4632,6 +4795,37 @@
     return out;
   }
 
+  // Local YYYY-MM-DD - toISOString would give the UTC date, a day off in the evening.
+  const ymdLocal = d => d.toLocaleDateString('en-CA');
+
+  // Open orders matching every filter. One condition goes as a plain object and
+  // several as an array - the two forms the order endpoint is known to accept.
+  async function fetchOrdersWhere(filters) {
+    const controller = window.OrderController;
+    if (!controller?.apiurl) throw new Error('Order module not available');
+    const filter = encodeURIComponent(JSON.stringify(filters.length === 1 ? filters[0] : filters));
+    const res = await fetch(RW_URL + controller.apiurl + '?pagesize=200&filter=' + filter,
+                            { headers: rwHeaders() });
+    if (!res.ok) throw new Error('orders ' + res.status);
+    return ((await res.json()).Items ?? [])
+      .filter(o => !SUBRENTAL_SKIP_STATUS.has(String(o.Status || '').toUpperCase()));
+  }
+
+  // Orders picking between two days (inclusive) and their sub-rental lines that
+  // still need sourcing; orders with none are dropped. Shared by the Sub Rentals
+  // and Today cards.
+  async function fetchUnsourcedSubRentals(from, to) {
+    const orders = await fetchOrdersWhere([
+      { Field: 'PickDate', Op: '>=', Value: ymdLocal(from) },
+      { Field: 'PickDate', Op: '<=', Value: ymdLocal(to)   },
+    ]);
+    const perOrder = await mapWithLimit(orders, SUBRENTAL_CONCURRENCY, async (o) => ({
+      order: o,
+      items: (await fetchOrderSubItems(o.OrderId)).filter(subItemNeedsSourcing),
+    }));
+    return perOrder.filter(g => g.items.length);
+  }
+
   async function loadSubRentals(forceRefresh = false) {
     const body = document.getElementById('rq-card-body-subrentals');
     if (!body) return;
@@ -4650,25 +4844,9 @@
 
     const from = new Date(); from.setHours(0, 0, 0, 0);
     const to = new Date(from); to.setDate(to.getDate() + subRentalDays());
-    const ymd = d => d.toLocaleDateString('en-CA'); // local YYYY-MM-DD, not UTC
-    const filter = encodeURIComponent(JSON.stringify([
-      { Field: 'PickDate', Op: '>=', Value: ymd(from) },
-      { Field: 'PickDate', Op: '<=', Value: ymd(to)   },
-    ]));
 
     try {
-      const res = await fetch(RW_URL + controller.apiurl + '?pagesize=200&filter=' + filter,
-                              { headers: rwHeaders() });
-      if (!res.ok) throw new Error('orders ' + res.status);
-      const orders = ((await res.json()).Items ?? [])
-        .filter(o => !SUBRENTAL_SKIP_STATUS.has(String(o.Status || '').toUpperCase()));
-
-      const perOrder = await mapWithLimit(orders, SUBRENTAL_CONCURRENCY, async (o) => ({
-        order: o,
-        items: (await fetchOrderSubItems(o.OrderId)).filter(subItemNeedsSourcing),
-      }));
-
-      const groups = groupSubRentalsByPickDate(perOrder.filter(g => g.items.length));
+      const groups = groupSubRentalsByPickDate(await fetchUnsourcedSubRentals(from, to));
       const unchanged = forceRefresh !== true && cached && sameData(groups, cached.groups);
       setCachedSection('subrentals', { groups, fetchedAt: Date.now() });
       if (!unchanged) renderSubRentals(groups);
@@ -4803,6 +4981,178 @@
     frag.append(inputWrap, applyBtn);
     card._cfgBar.insertBefore(frag, card._cfgBar.firstChild);
 
+    card._collapseBtn.insertAdjacentElement('beforebegin', refreshBtn);
+    return card;
+  }
+
+  // ── Today card ────────────────────────────────────────────────────
+  // The day at a glance: unsourced sub-rentals picking in the next 48 hours, what
+  // is on the prep floor, what goes out and what comes back - each with whose
+  // order it is, and yours picked out.
+  const TODAY_TTL      = 5 * 60 * 1000;
+  const TODAY_SUB_DAYS = 2;
+
+  // Only what the card shows, so the session cache stays small.
+  function slimOrder(o) {
+    return {
+      OrderId: o.OrderId, OrderNumber: o.OrderNumber, Description: o.Description,
+      Agent: o.Agent, Customer: o.Customer || o.CustomerName || null, PickDate: o.PickDate,
+    };
+  }
+
+  // Today's tab of the prep sheet, joined to RW for descriptions and agents.
+  // Null when no sheet is configured, so the section can say so.
+  async function fetchTodayPreps() {
+    const sheetUrl = localStorage.getItem(PREPS_SHEET_KEY);
+    const sheetId = sheetUrl && RQ.sheets?.getSheetIdFromUrl(sheetUrl);
+    if (!sheetId) return null;
+    const rows = await RQ.sheets.fetchPrepRows(sheetId, RQ.sheets.fmtDate(new Date()));
+    const orderNos = [...new Set(rows.map(r => (r['Order No.'] || '').trim()).filter(Boolean))];
+    const rw = await fetchOrdersByNumbers(orderNos);
+    return rows.filter(r => (r['Order No.'] || '').trim()).map(r => {
+      const no = r['Order No.'].trim();
+      const o = rw.get(no);
+      return {
+        ...slimOrder(o || { OrderNumber: no }),
+        OrderNumber: no,
+        Tech: (r['Prep Tech'] || '').trim(),
+        Location: (r['Prep Location'] || '').trim(),
+      };
+    });
+  }
+
+  async function loadToday(forceRefresh = false) {
+    const body = document.getElementById('rq-card-body-today');
+    if (!body) return;
+
+    const day    = ymdLocal(new Date());
+    const cached = getCachedSection('today');
+    const sameDay = !!cached && cached.day === day; // yesterday's "today" is never fresh
+    const fresh   = sameDay && (Date.now() - cached.fetchedAt) < TODAY_TTL;
+    if (sameDay && body.dataset.rqRendered !== '1') renderToday(cached.data);
+    if (!forceRefresh && fresh) return;
+    if (!sameDay) body.innerHTML = placeholderHTML('Loading…');
+
+    const from = new Date(); from.setHours(0, 0, 0, 0);
+    const to = new Date(from); to.setDate(to.getDate() + TODAY_SUB_DAYS);
+
+    try {
+      // Each part fails on its own: a bad prep sheet must not blank the orders.
+      const settle = (p) => p.then(v => v, () => undefined);
+      const [goingOut, dueBack, subs, preps] = await Promise.all([
+        settle(fetchOrdersWhere([{ Field: 'EstimatedStartDate', Op: '=', Value: day }])),
+        settle(fetchOrdersWhere([{ Field: 'EstimatedStopDate',  Op: '=', Value: day }])),
+        settle(fetchUnsourcedSubRentals(from, to)),
+        settle(fetchTodayPreps()),
+      ]);
+      if ([goingOut, dueBack, subs].every(v => v === undefined)) throw new Error('all failed');
+
+      const data = {
+        subs:     subs === undefined ? undefined : subs.map(g => ({
+                    order: slimOrder(g.order),
+                    items: g.items.map(i => ({ ICode: i.ICode, Description: i.Description,
+                      SubQuantity: i.SubQuantity, Vendor: i.Vendor, PurchaseOrderNumber: i.PurchaseOrderNumber })),
+                  })),
+        preps:    preps,
+        goingOut: goingOut?.map(slimOrder),
+        dueBack:  dueBack?.map(slimOrder),
+      };
+      const unchanged = forceRefresh !== true && sameDay && sameData(data, cached.data);
+      setCachedSection('today', { data, day, fetchedAt: Date.now() });
+      if (!unchanged) renderToday(data);
+      updateCardAges();
+    } catch {
+      if (!sameDay) body.innerHTML = placeholderHTML('Failed to load today');
+    }
+  }
+
+  function isMyAgent(agent) {
+    const mine = (localStorage.getItem(MY_ORDERS_AGENT_KEY) || '').trim().toUpperCase();
+    return !!mine && String(agent || '').trim().toUpperCase() === mine;
+  }
+
+  function buildTodayOrderRow(order, note) {
+    const row = el('div', `
+      display: flex; align-items: baseline; gap: 7px; padding: 2px 14px; cursor: pointer;`);
+    row.className = 'rq-today-row';
+    row.appendChild(el('span', 'font-size: 12px; font-weight: 600; color: #ccc; flex-shrink: 0;',
+                       order.OrderNumber || ''));
+    row.appendChild(el('span', `
+      font-size: 12px; color: #999; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; flex: 1 1 auto;`, order.Description || ''));
+    if (note) row.appendChild(el('span', 'font-size: 10px; color: #8a9a5a; flex-shrink: 0;', note));
+    if (order.Agent) {
+      const mine = isMyAgent(order.Agent);
+      row.appendChild(el('span', `font-size: 10px; flex-shrink: 0; color: ${mine ? '#7aca7a' : '#6a8a9a'};
+                                  font-weight: ${mine ? 700 : 400};`, order.Agent));
+    }
+    row.addEventListener('mouseenter', () => { row.style.background = '#232323'; });
+    row.addEventListener('mouseleave', () => { row.style.background = ''; });
+    row.addEventListener('click', () => {
+      closePanel();
+      if (order.OrderId) RQ.api.open_form_tab('Order', order.OrderId);
+      else if (order.OrderNumber) RQ.api.open_record_by_number('Order', order.OrderNumber);
+    });
+    return row;
+  }
+
+  function renderToday(data) {
+    const body = document.getElementById('rq-card-body-today');
+    if (!body) return;
+    body.dataset.rqRendered = '1';
+    body.innerHTML = '';
+
+    const section = (title, list, emptyText, buildRows) => {
+      const n = Array.isArray(list) ? list.length : null;
+      const header = el('div', `
+        padding: 6px 14px 2px; font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+        text-transform: uppercase; color: ${n ? '#888' : '#555'};
+        ${body.children.length ? 'border-top: 1px solid #222; margin-top: 4px;' : ''}`,
+        title + (n ? ` · ${n}` : ''));
+      body.appendChild(header);
+      if (list === undefined) { body.insertAdjacentHTML('beforeend', placeholderHTML("Couldn't load")); return; }
+      if (list === null)      { body.insertAdjacentHTML('beforeend', placeholderHTML(emptyText)); return; }
+      if (!list.length)       { body.insertAdjacentHTML('beforeend', placeholderHTML(emptyText)); return; }
+      buildRows(list);
+    };
+
+    // Most urgent first: these are the ones that can still go wrong today.
+    section('Sub rentals to source', data.subs, 'Nothing unsourced in the next 48 hours', (list) => {
+      const todayStr = ymdLocal(new Date());
+      const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+      const dayName = (d) => !d ? '' : d === todayStr ? 'picks today'
+        : d === ymdLocal(tomorrow) ? 'picks tomorrow'
+        : 'picks ' + new Date(d + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' });
+      list.slice().sort((a, b) => String(a.order.PickDate).localeCompare(String(b.order.PickDate)))
+        .forEach(({ order, items }) => {
+          body.appendChild(buildTodayOrderRow(order, dayName(String(order.PickDate || '').slice(0, 10))));
+          const holder = el('div', 'padding: 0 14px 3px 26px;');
+          renderRowItems(holder, items, buildSubRentalItemLine);
+          body.appendChild(holder);
+        });
+    });
+
+    section('Prepping', data.preps, 'No prep sheet set (Preps card settings)', (list) => {
+      list.forEach(p => body.appendChild(buildTodayOrderRow(p,
+        [p.Location, p.Tech].filter(Boolean).join(' · '))));
+    });
+    if (Array.isArray(data.preps) && !data.preps.length) {
+      body.lastChild.textContent = 'Nothing on the prep sheet today';
+    }
+
+    section('Going out', data.goingOut, 'Nothing going out today', (list) =>
+      list.forEach(o => body.appendChild(buildTodayOrderRow(o, o.Customer))));
+    section('Due back', data.dueBack, 'Nothing due back today', (list) =>
+      list.forEach(o => body.appendChild(buildTodayOrderRow(o, o.Customer))));
+  }
+
+  function buildTodayCard() {
+    const card = buildCard('Today', 'today', 'today');
+    const refreshBtn = makeIconButton('refresh', {
+      title: 'Refresh',
+      onClick: () => { clearCachedSection('today'); loadToday(true); },
+    });
+    card._badgeToggleBtn?.remove(); // its rows carry no due badges
     card._collapseBtn.insertAdjacentElement('beforebegin', refreshBtn);
     return card;
   }
