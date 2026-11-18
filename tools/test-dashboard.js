@@ -543,13 +543,16 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
     'rq-dashboard-body': { style: {} },
     'rq-dashboard-expand': { style: {}, textContent: '', title: '' },
   };
-  const LY = new Function('localStorage', 'document',
-    "const DASH_EXPANDED_KEY='rq-dashboard-expanded';const DASH_PANEL_WIDTH='575px';const DASH_MIN_COLUMN=340;" +
+  // Masonry start/stop are spied here and exercised for real further down.
+  const masonryCalls = [];
+  const LY = new Function('localStorage', 'document', 'startMasonry', 'stopMasonry',
+    "const DASH_EXPANDED_KEY='rq-dashboard-expanded';const DASH_PANEL_WIDTH='575px';const DASH_MIN_COLUMN=340;const MASONRY_ROW=4;const MASONRY_GAP=16;" +
     extractFn('js/rq_dashboard.js', 'isDashExpanded') +
     extractFn('js/rq_dashboard.js', 'applyDashboardLayout') +
     extractFn('js/rq_dashboard.js', 'toggleDashboardExpanded') +
     '; return { isDashExpanded, applyDashboardLayout, toggleDashboardExpanded };')(
-    layoutStore, { getElementById: (id) => nodes[id] ?? null });
+    layoutStore, { getElementById: (id) => nodes[id] ?? null },
+    () => masonryCalls.push('start'), () => masonryCalls.push('stop'));
 
   const panelNode = nodes['rq-dashboard'], bodyNode = nodes['rq-dashboard-body'], btnNode = nodes['rq-dashboard-expand'];
 
@@ -565,10 +568,12 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         bodyNode.style.gridTemplateColumns, 'repeat(auto-fill, minmax(340px, 1fr))');
   check('cards keep their own height', bodyNode.style.alignItems, 'start');
   check('flexDirection is cleared so it cannot fight the grid', bodyNode.style.flexDirection, '');
-  // Without content-sized rows, two rows taller than the viewport get squeezed and
-  // overflow:hidden cards spill into the row below.
-  check('rows size to their content', bodyNode.style.gridAutoRows, 'max-content');
+  // Masonry: fine rows that each card spans, with spacing built into the span.
+  check('rows are the fine masonry unit', bodyNode.style.gridAutoRows, '4px');
+  check('the grid adds no row gap of its own', bodyNode.style.rowGap, '0');
+  check('cards keep a gap across', bodyNode.style.columnGap, '16px');
   check('rows pack to the top', bodyNode.style.alignContent, 'start');
+  check('expanding starts masonry', masonryCalls.at(-1), 'start');
   check('button offers to shrink', btnNode.textContent, 'close_fullscreen');
   check('the choice is persisted', layoutStore.getItem('rq-dashboard-expanded'), '1');
 
@@ -579,6 +584,9 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('alignItems is cleared', bodyNode.style.alignItems, '');
   check('gridAutoRows is cleared', bodyNode.style.gridAutoRows, '');
   check('alignContent is cleared', bodyNode.style.alignContent, '');
+  check('rowGap and columnGap are cleared', [bodyNode.style.rowGap, bodyNode.style.columnGap], ['', '']);
+  check('the panel gap is restored', bodyNode.style.gap, '16px');
+  check('shrinking stops masonry', masonryCalls.at(-1), 'stop');
   check('flexDirection is restored', bodyNode.style.flexDirection, 'column');
 
   // A saved preference must survive a fresh panel.
@@ -587,14 +595,62 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('a saved expanded state is restored on open', bodyNode.style.display, 'grid');
 
   // Missing nodes must not throw - the panel is built lazily.
-  const LY2 = new Function('localStorage', 'document',
-    "const DASH_EXPANDED_KEY='rq-dashboard-expanded';const DASH_PANEL_WIDTH='575px';const DASH_MIN_COLUMN=340;" +
+  const LY2 = new Function('localStorage', 'document', 'startMasonry', 'stopMasonry',
+    "const DASH_EXPANDED_KEY='rq-dashboard-expanded';const DASH_PANEL_WIDTH='575px';const DASH_MIN_COLUMN=340;const MASONRY_ROW=4;const MASONRY_GAP=16;" +
     extractFn('js/rq_dashboard.js', 'isDashExpanded') +
     extractFn('js/rq_dashboard.js', 'applyDashboardLayout') +
-    '; return applyDashboardLayout;')(layoutStore, { getElementById: () => null });
+    '; return applyDashboardLayout;')(layoutStore, { getElementById: () => null }, () => {}, () => {});
   let threw = false;
   try { LY2(); } catch { threw = true; }
   check('no panel yet is a no-op, not a throw', threw, false);
+
+  // -- Masonry packing, run for real against fake observers --------------------
+  console.log('masonry:');
+  const observers = { resize: null, mutate: null };
+  class FakeRO { constructor(cb) { this.cb = cb; this.seen = []; observers.resize = this; }
+    observe(n) { this.seen.push(n); } disconnect() { this.off = true; } }
+  class FakeMO { constructor(cb) { this.cb = cb; observers.mutate = this; }
+    observe() {} disconnect() { this.off = true; } }
+  const M = new Function('ResizeObserver', 'MutationObserver',
+    'const MASONRY_ROW=4;const MASONRY_GAP=16;let masonryResize=null;let masonryMutate=null;' +
+    extractFn('js/rq_dashboard.js', 'masonrySpan') +
+    extractFn('js/rq_dashboard.js', 'sizeMasonryItem') +
+    extractFn('js/rq_dashboard.js', 'startMasonry') +
+    extractFn('js/rq_dashboard.js', 'stopMasonry') +
+    '; return { masonrySpan, sizeMasonryItem, startMasonry, stopMasonry };')(FakeRO, FakeMO);
+
+  check('span covers the card plus the gap', M.masonrySpan(100), 29);   // (100+16)/4
+  check('span rounds up rather than clipping', M.masonrySpan(101), 30);
+  check('a zero-height card still spans a row', M.masonrySpan(0) >= 1, true);
+  check('a long card spans proportionally more', M.masonrySpan(2000) > M.masonrySpan(200) * 9, true);
+
+  const card = (h, hidden = false) => ({ nodeType: 1, style: {}, offsetParent: hidden ? null : {},
+    getBoundingClientRect: () => ({ height: h }) });
+  const tall = card(800), short = card(120), hiddenCard = card(300, true);
+  const mBody = { children: [tall, short, hiddenCard] };
+  M.startMasonry(mBody);
+  check('each card spans rows for its own height',
+        [tall.style.gridRowEnd, short.style.gridRowEnd], ['span 204', 'span 34']);
+  // Cleared by the reset at the top of startMasonry, never given a span of its own.
+  check('a card on another tab gets no span', hiddenCard.style.gridRowEnd || '', '');
+  check('every card is watched for resizes', observers.resize.seen.length, 3);
+
+  // A card grows after layout - items loaded, "+N more" clicked.
+  short.getBoundingClientRect = () => ({ height: 400 });
+  observers.resize.cb([{ target: short }]);
+  check('a resized card is re-spanned', short.style.gridRowEnd, 'span 104');
+
+  // A card added later (tab switch, Add Section) is picked up.
+  const added = card(60);
+  observers.mutate.cb([{ addedNodes: [added] }]);
+  check('a newly added card is spanned', added.style.gridRowEnd, 'span 19');
+  check('and watched', observers.resize.seen.includes(added), true);
+
+  const ro = observers.resize, mo = observers.mutate;
+  M.stopMasonry(mBody);
+  check('stopping disconnects both observers', [ro.off, mo.off], [true, true]);
+  check('stopping clears every span',
+        mBody.children.map(c => c.style.gridRowEnd), ['', '', '']);
 
   const dashSrc6 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
   check('card reordering follows the layout axis',

@@ -1647,6 +1647,54 @@
     return localStorage.getItem(DASH_EXPANDED_KEY) === '1';
   }
 
+  // ── Masonry packing for the expanded grid ─────────────────────────
+  // A plain grid makes every row as tall as its tallest card, so one long list
+  // pushes everything beneath it down the screen. Instead the grid is cut into
+  // thin rows and each card is told how many to span; the browser's normal
+  // auto-placement then drops each card into the first gap that fits, in DOM
+  // order. Cards stay ordinary children of the body, so drag-reorder, tab
+  // filtering and Add Section are untouched.
+  const MASONRY_ROW = 4;  // px - finer packs tighter, at the cost of more rows
+  const MASONRY_GAP = 16; // px - space between cards, both across and down
+  let masonryResize = null;
+  let masonryMutate = null;
+
+  // Rows a card of this height occupies, with the gap below it included.
+  function masonrySpan(height) {
+    return Math.max(1, Math.ceil((height + MASONRY_GAP) / MASONRY_ROW));
+  }
+
+  function sizeMasonryItem(item) {
+    // Cards on other tabs are display:none and take no grid space; they are
+    // measured when shown, because ResizeObserver fires on that change too.
+    if (item.offsetParent === null) return;
+    item.style.gridRowEnd = 'span ' + masonrySpan(item.getBoundingClientRect().height);
+  }
+
+  function startMasonry(body) {
+    stopMasonry(body);
+    // A card's height changes after layout - items load in, "+N more" expands,
+    // a card collapses - so each one is re-measured whenever it resizes. Setting
+    // the span changes the card's slot, never its size, so this cannot loop.
+    masonryResize = new ResizeObserver(entries => entries.forEach(e => sizeMasonryItem(e.target)));
+    const watch = (node) => {
+      if (node.nodeType !== 1) return;
+      masonryResize.observe(node);
+      sizeMasonryItem(node);
+    };
+    [...body.children].forEach(watch);
+    // Cards are rebuilt on tab switches and added via Add Section.
+    masonryMutate = new MutationObserver(muts => muts.forEach(m => m.addedNodes.forEach(watch)));
+    masonryMutate.observe(body, { childList: true });
+  }
+
+  function stopMasonry(body) {
+    masonryResize?.disconnect();
+    masonryMutate?.disconnect();
+    masonryResize = masonryMutate = null;
+    if (body) [...body.children].forEach(c => { c.style.gridRowEnd = ''; });
+  }
+
   function applyDashboardLayout() {
     const panel = document.getElementById('rq-dashboard');
     const body  = document.getElementById('rq-dashboard-body');
@@ -1659,18 +1707,25 @@
       body.style.display = 'grid';
       body.style.gridTemplateColumns = `repeat(auto-fill, minmax(${DASH_MIN_COLUMN}px, 1fr))`;
       body.style.alignItems = 'start'; // each card keeps its own height
-      // Rows must size to their content. Cards are overflow:hidden, which lets a
-      // grid row shrink below the card's real height; with the body a fixed
-      // (viewport) height, two rows taller than the screen got squeezed and each
-      // card spilled into the row below. max-content rows let the body scroll.
-      body.style.gridAutoRows = 'max-content';
+      // Masonry: rows are a fine MASONRY_ROW unit and each card spans as many as
+      // its height needs (see startMasonry), so a long card only lengthens its own
+      // column instead of setting the height of a whole row. Vertical spacing is
+      // built into each card's span, so the grid's own row gap must be zero.
+      body.style.gridAutoRows = MASONRY_ROW + 'px';
+      body.style.rowGap = '0';
+      body.style.columnGap = MASONRY_GAP + 'px';
       body.style.alignContent = 'start';
       body.style.flexDirection = '';
+      startMasonry(body);
     } else {
+      stopMasonry(body);
       body.style.display = 'flex';
       body.style.flexDirection = 'column';
       body.style.gridTemplateColumns = '';
       body.style.gridAutoRows = '';
+      body.style.rowGap = '';
+      body.style.columnGap = '';
+      body.style.gap = '16px'; // clearing the longhands drops the panel's original gap
       body.style.alignContent = '';
       body.style.alignItems = '';
     }
