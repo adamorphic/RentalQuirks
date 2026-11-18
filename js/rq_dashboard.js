@@ -1372,9 +1372,15 @@
         // Rows assign style.background inline on hover, which would paint over a
         // tint, so the due-today marker is an inset shadow on the leading edge.
         '.rq-due-today { box-shadow: inset 3px 0 0 #e09820; }',
-        // Same look, separate class: applyBadge clears .rq-due-today on every pass,
-        // so a second rule sharing it would be wiped whenever a badge recomputes.
-        '.rq-date-today { box-shadow: inset 3px 0 0 #e09820; }',
+        // My POs: green when it starts today (going out), amber when it ends today
+        // (coming back - the same amber as the due-today bar, so amber always means
+        // "ends today"). Both today: a two-tone bar. Separate classes from
+        // .rq-due-today, which applyBadge clears on every pass. These rules must come
+        // after it: a PO ending today carries both, and the later rule wins; the
+        // two-class rule outranks either single colour.
+        '.rq-date-start-today { box-shadow: inset 3px 0 0 #4a9a5a; }',
+        '.rq-date-stop-today  { box-shadow: inset 3px 0 0 #e09820; }',
+        '.rq-date-start-today.rq-date-stop-today { box-shadow: inset 3px 0 0 #4a9a5a, inset 6px 0 0 #e09820; }',
         '@keyframes rq-spin-kf { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }',
         '.rq-spin { animation: rq-spin-kf 0.6s ease-out 1; }',
       ].join('\n');
@@ -4607,13 +4613,17 @@
     return ymd === new Date().toLocaleDateString('en-CA');
   }
 
-  // Marks a row whose record starts or stops today. The dates usually come from
-  // the detail fetch the due badge already makes, so this costs no extra request.
+  // Marks a row whose record starts and/or stops today, distinguishably. The dates
+  // usually come from the detail fetch the due badge already makes, so this costs
+  // no extra request.
   function attachTodayHighlight(row, module, recordNumber) {
     const apply = (rec) => {
       if (!rec) return;
-      row.classList.toggle('rq-date-today',
-        isTodayDate(rec.EstimatedStartDate) || isTodayDate(rec.EstimatedStopDate));
+      const starts = isTodayDate(rec.EstimatedStartDate);
+      const stops  = isTodayDate(rec.EstimatedStopDate);
+      row.classList.toggle('rq-date-start-today', starts);
+      row.classList.toggle('rq-date-stop-today', stops);
+      row.title = starts && stops ? 'Starts and ends today' : starts ? 'Starts today' : stops ? 'Ends today' : '';
     };
     apply(detailCache.get(module + ':' + recordNumber)?.data?.record);
     fetchRecordDetail(module, recordNumber).then(d => apply(d?.record)).catch(() => {});

@@ -1135,21 +1135,38 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('blank does not', PTpure.isTodayDate(''), false);
 
   const mkClassRow = () => { const c = new Set();
-    return { has: (x) => c.has(x), classList: { toggle: (x, on) => on ? c.add(x) : c.delete(x) } }; };
+    return { has: (x) => c.has(x), title: '', classList: { toggle: (x, on) => on ? c.add(x) : c.delete(x) } }; };
+  // Returns [starts-today class, stops-today class, tooltip].
   const runHL = async (rec) => {
     const row = mkClassRow();
     PT(new Map(), () => Promise.resolve({ record: rec })).attachTodayHighlight(row, 'PurchaseOrder', 'LA1');
     await Promise.resolve(); await Promise.resolve();
-    return row.has('rq-date-today');
+    return [row.has('rq-date-start-today'), row.has('rq-date-stop-today'), row.title];
   };
-  check('a PO starting today is highlighted', await runHL({ EstimatedStartDate: ymdToday, EstimatedStopDate: '2099-01-01' }), true);
-  check('a PO stopping today is highlighted', await runHL({ EstimatedStartDate: '2000-01-01', EstimatedStopDate: ymdToday }), true);
-  check('a PO with neither today is not', await runHL({ EstimatedStartDate: yesterday, EstimatedStopDate: '2099-01-01' }), false);
+  check('starting today is marked as a start', await runHL({ EstimatedStartDate: ymdToday, EstimatedStopDate: '2099-01-01' }),
+        [true, false, 'Starts today']);
+  check('ending today is marked as an end', await runHL({ EstimatedStartDate: '2000-01-01', EstimatedStopDate: ymdToday }),
+        [false, true, 'Ends today']);
+  check('starting and ending today is marked as both', await runHL({ EstimatedStartDate: ymdToday, EstimatedStopDate: ymdToday }),
+        [true, true, 'Starts and ends today']);
+  check('neither today is not marked', await runHL({ EstimatedStartDate: yesterday, EstimatedStopDate: '2099-01-01' }),
+        [false, false, '']);
 
   const dashSrc14 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
   check('My POs opts in', /mypos:[\s\S]{0,900}?highlightToday: true/.test(dashSrc14), true);
-  check('it has its own class, so the due badge cannot clear it',
-        /'\.rq-date-today \{ box-shadow: inset/.test(dashSrc14) && !/remove\('rq-date-today'\)/.test(dashSrc14), true);
+  // Stylesheet order matters: a PO ending today also carries .rq-due-today, and
+  // with equal specificity the later rule wins.
+  const ruleAt = (sel) => dashSrc14.indexOf("'" + sel + ' ');
+  check('start and end have different colours',
+        /'\.rq-date-start-today \{ box-shadow: inset 3px 0 0 #4a9a5a/.test(dashSrc14) &&
+        /'\.rq-date-stop-today\s+\{ box-shadow: inset 3px 0 0 #e09820/.test(dashSrc14), true);
+  check('the new rules come after the due-today rule, so they win',
+        ruleAt('.rq-due-today') > 0 && ruleAt('.rq-date-start-today') > ruleAt('.rq-due-today') &&
+        ruleAt('.rq-date-stop-today') > ruleAt('.rq-due-today'), true);
+  check('both-today has a two-tone rule that outranks either colour',
+        /'\.rq-date-start-today\.rq-date-stop-today \{ box-shadow: inset 3px 0 0 #4a9a5a, inset 6px 0 0 #e09820/.test(dashSrc14), true);
+  check('the due badge never clears them',
+        !/remove\('rq-date-(start|stop)-today'\)/.test(dashSrc14), true);
 
 
   // -- Search ------------------------------------------------------------------
