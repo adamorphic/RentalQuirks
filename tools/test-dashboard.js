@@ -1020,16 +1020,21 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
 
   const asked = [];
   const FU = new Function('fetchOrdersWhere', 'fetchOrderSubItems', 'mapWithLimit', 'subItemNeedsSourcing',
-    'SUBRENTAL_CONCURRENCY', 'ymdLocal',
+    'SUBRENTAL_CONCURRENCY', 'ymdLocal', 'isPersonalGear',
     extractFn('js/rq_dashboard.js', 'fetchUnsourcedSubRentals') + '; return fetchUnsourcedSubRentals;')(
-    async (f) => { asked.push(f); return [{ OrderId: 1 }, { OrderId: 2 }]; },
-    async (id) => id === 1 ? [{ Vendor: '', PurchaseOrderNumber: '' }] : [{ Vendor: 'V', PurchaseOrderNumber: 'P' }],
+    async (f) => { asked.push(f); return [{ OrderId: 1 }, { OrderId: 2 }, { OrderId: 3 }]; },
+    async (id) => id === 1 ? [{ ICode: 'LENS', Vendor: '', PurchaseOrderNumber: '' }]
+               : id === 3 ? [{ ICode: 'PGMONITOR', Vendor: '', PurchaseOrderNumber: '' }]
+               : [{ ICode: 'CAM', Vendor: 'V', PurchaseOrderNumber: 'P' }],
     async (items, n, fn) => Promise.all(items.map(fn)),
-    (r) => !r.Vendor || !r.PurchaseOrderNumber, 5, (d) => d.toLocaleDateString('en-CA'));
+    (r) => !r.Vendor || !r.PurchaseOrderNumber, 5, (d) => d.toLocaleDateString('en-CA'),
+    (l) => /pg/i.test(String(l?.ICode || '')));
   const fuOut = await FU(new Date(2026, 10, 18), new Date(2026, 10, 20));
   check('the pick-date window is sent as a range',
         asked[0].map(f => f.Op + f.Value), ['>=2026-11-18', '<=2026-11-20']);
   check('orders with nothing to source are dropped', fuOut.map(g => g.order.OrderId), [1]);
+  check('an order whose only unsourced line is personal gear is dropped too',
+        fuOut.some(g => g.order.OrderId === 3), false);
 
   const SL = new Function(extractFn('js/rq_dashboard.js', 'slimOrder') + '; return slimOrder;')();
   check('the cached order shape is small',
@@ -1082,6 +1087,21 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('fully booked lines are filtered at render, so the toggle needs no refetch',
         /e\.items\.filter\(i => i\.kind === 'short' \|\| tight\)/.test(dashSrc12), true);
   check('Shortages is auto-refreshed', /shortages:\s+\(mode\) => loadShortages\(mode\)/.test(dashSrc12), true);
+
+
+  // -- Personal gear ------------------------------------------------------------
+  console.log('personal gear:');
+  const PG = new Function(extractFn('js/rq_dashboard.js', 'isPersonalGear') + '; return isPersonalGear;')();
+  check('a PG I-Code is personal gear', PG({ ICode: 'PGMONITOR' }), true);
+  check('lowercase pg too', PG({ ICode: 'camerapg' }), true);
+  check('PG anywhere in the code counts', PG({ ICode: 'ALEXPG35' }), true);
+  check('ordinary kit is not', PG({ ICode: 'ALEXA35X' }), false);
+  check('a missing I-Code is not', PG({}), false);
+  const dashSrc13 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('Sub Rentals and Today drop personal gear',
+        /\.filter\(i => subItemNeedsSourcing\(i\) && !isPersonalGear\(i\)\)/.test(dashSrc13), true);
+  check('Shortages drops personal gear',
+        /if \(isPersonalGear\(l\)\) continue;/.test(dashSrc13), true);
 
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');

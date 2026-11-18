@@ -4786,6 +4786,13 @@
     return !String(r.Vendor || '').trim() || !String(r.PurchaseOrderNumber || '').trim();
   }
 
+  // Personal gear - kit belonging to crew rather than the house - is marked by
+  // "PG" in its I-Code. It never needs sourcing and is never a shortage of ours,
+  // so it is left out of Sub Rentals, Shortages and Today.
+  function isPersonalGear(line) {
+    return /pg/i.test(String(line?.ICode || ''));
+  }
+
   // Runs fn over items with at most `limit` in flight, preserving order.
   async function mapWithLimit(items, limit, fn) {
     const out = new Array(items.length);
@@ -4825,7 +4832,8 @@
     ]);
     const perOrder = await mapWithLimit(orders, SUBRENTAL_CONCURRENCY, async (o) => ({
       order: o,
-      items: (await fetchOrderSubItems(o.OrderId)).filter(subItemNeedsSourcing),
+      items: (await fetchOrderSubItems(o.OrderId))
+        .filter(i => subItemNeedsSourcing(i) && !isPersonalGear(i)),
     }));
     return perOrder.filter(g => g.items.length);
   }
@@ -5099,6 +5107,7 @@
         lines.forEach(l => states.add(String(l.AvailabilityState)));
         const items = [];
         for (const l of lines) {
+          if (isPersonalGear(l)) continue;
           const kind = classifyAvailability(l);
           if (kind) items.push(slimAvailabilityLine(l, kind));
         }
