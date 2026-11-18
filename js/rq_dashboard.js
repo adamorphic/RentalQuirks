@@ -4793,6 +4793,15 @@
     return /pg/i.test(String(line?.ICode || ''));
   }
 
+  // Drops personal gear from [{ order, items }] and any order left empty. Applied
+  // when drawing as well as when fetching: these cards draw from a session cache
+  // first, and a cache saved before a rule existed must not bring lines back.
+  function withoutPersonalGear(entries) {
+    return (entries || [])
+      .map(e => ({ ...e, items: (e.items || []).filter(i => !isPersonalGear(i)) }))
+      .filter(e => e.items.length);
+  }
+
   // Runs fn over items with at most `limit` in flight, preserving order.
   async function mapWithLimit(items, limit, fn) {
     const out = new Array(items.length);
@@ -4888,6 +4897,9 @@
     const body = document.getElementById('rq-card-body-subrentals');
     if (!body) return;
     body.innerHTML = '';
+    groups = (groups || [])
+      .map(g => ({ ...g, entries: withoutPersonalGear(g.entries) }))
+      .filter(g => g.entries.length);
 
     if (!groups || !groups.length) {
       body.innerHTML = placeholderHTML('Nothing waiting to be sourced');
@@ -5141,7 +5153,7 @@
     const tight = showTightShortages();
     const visible = (groups || [])
       .map(g => ({ ...g, entries: g.entries
-        .map(e => ({ ...e, items: e.items.filter(i => i.kind === 'short' || tight) }))
+        .map(e => ({ ...e, items: e.items.filter(i => (i.kind === 'short' || tight) && !isPersonalGear(i)) }))
         .filter(e => e.items.length) }))
       .filter(g => g.entries.length);
 
@@ -5343,6 +5355,7 @@
     if (!body) return;
     body.dataset.rqRendered = '1';
     body.innerHTML = '';
+    if (Array.isArray(data?.subs)) data = { ...data, subs: withoutPersonalGear(data.subs) };
 
     const section = (title, list, emptyText, buildRows) => {
       const n = Array.isArray(list) ? list.length : null;

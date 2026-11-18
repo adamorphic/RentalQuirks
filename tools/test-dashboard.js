@@ -1085,7 +1085,7 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('background refreshes wait out the Shortages TTL',
         /if \(forceRefresh !== true && fresh\) return;/.test(dashSrc12), true);
   check('fully booked lines are filtered at render, so the toggle needs no refetch',
-        /e\.items\.filter\(i => i\.kind === 'short' \|\| tight\)/.test(dashSrc12), true);
+        /e\.items\.filter\(i => \(i\.kind === 'short' \|\| tight\)/.test(dashSrc12), true);
   check('Shortages is auto-refreshed', /shortages:\s+\(mode\) => loadShortages\(mode\)/.test(dashSrc12), true);
 
 
@@ -1102,6 +1102,19 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         /\.filter\(i => subItemNeedsSourcing\(i\) && !isPersonalGear\(i\)\)/.test(dashSrc13), true);
   check('Shortages drops personal gear',
         /if \(isPersonalGear\(l\)\) continue;/.test(dashSrc13), true);
+
+  // Cards draw from a session cache before refetching, so a cache saved before
+  // the rule existed must still be filtered when drawn.
+  const WPG = new Function('isPersonalGear',
+    extractFn('js/rq_dashboard.js', 'withoutPersonalGear') + '; return withoutPersonalGear;')(PG);
+  check('drawing drops personal gear lines from cached data',
+        WPG([{ order: { OrderNumber: 'A' }, items: [{ ICode: 'LENS' }, { ICode: 'PGMON' }] }])
+          .map(e => e.items.map(i => i.ICode)), [['LENS']]);
+  check('an order left with only personal gear is not drawn',
+        WPG([{ order: { OrderNumber: 'B' }, items: [{ ICode: 'PGMON' }] }]), []);
+  check('Sub Rentals filters when drawing', /entries: withoutPersonalGear\(g\.entries\)/.test(dashSrc13), true);
+  check('Today filters when drawing', /subs: withoutPersonalGear\(data\.subs\)/.test(dashSrc13), true);
+  check('Shortages filters when drawing', /\(i\.kind === 'short' \|\| tight\) && !isPersonalGear\(i\)/.test(dashSrc13), true);
 
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
