@@ -1599,6 +1599,8 @@
           searchResults.style.display = 'none';
           appendRecordResults(q, searchResults);
         });
+        row.classList.add('rq-search-row');
+        row._open = () => row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
         row.append(icon, text, removeBtn);
         searchResults.appendChild(row);
       });
@@ -1625,10 +1627,59 @@
       }, isInventorySearch ? 500 : 350);
     });
 
+    // Up/Down move through results, Enter opens the highlighted one (or the first),
+    // Escape closes the results, then clears the box. The panel's own arrow-key
+    // navigation deliberately ignores inputs, so without this the results could
+    // only be reached with the mouse.
+    const visibleSearchRows = () => searchResults.style.display === 'none'
+      ? [] : [...searchResults.querySelectorAll('.rq-search-row')];
+    const setActiveSearchRow = (row) => {
+      searchResults.querySelectorAll('.rq-search-active').forEach(r => {
+        r.classList.remove('rq-search-active');
+        r.style.background = '';
+      });
+      if (!row) return;
+      row.classList.add('rq-search-active');
+      row.style.background = '#333';
+      row.scrollIntoView({ block: 'nearest' });
+    };
+
     searchInput.addEventListener('keydown', (e) => {
+      const rows = visibleSearchRows();
+      const activeIdx = rows.findIndex(r => r.classList.contains('rq-search-active'));
+
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        if (!rows.length) return;
+        e.preventDefault();
+        const next = e.key === 'ArrowDown'
+          ? Math.min(activeIdx + 1, rows.length - 1)
+          : Math.max(activeIdx - 1, 0);
+        setActiveSearchRow(rows[next]);
+        return;
+      }
+
       if (e.key === 'Enter') {
         const val = searchInput.value.trim();
-        if (val) pushSearchHistory(val);
+        const target = rows[activeIdx] || rows[0];
+        if (target?._open) { e.preventDefault(); target._open(); return; }
+        if (!val) return;
+        pushSearchHistory(val);
+        // Enter before the debounce fired: search now rather than wait.
+        clearTimeout(searchTimeout);
+        appendRecordResults(val, searchResults);
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (searchResults.style.display !== 'none') {
+          searchResults.style.display = 'none';
+          searchResults._showingHistory = false;
+          historyBtn.style.color = '#555';
+        } else if (searchInput.value) {
+          searchInput.value = '';
+          searchInput.dispatchEvent(new Event('input'));
+        }
       }
     });
 
@@ -6416,10 +6467,33 @@
     { name: 'RentalInventory', field: 'Description',  numberField: 'ICode',          icon: 'videocam',      display: ['Description',  'ICode'         ] },
     { name: 'Customer',        field: 'Customer',     numberField: 'CustomerNumber', icon: 'person',        display: ['Customer',     'CustomerNumber'] },
     { name: 'Asset',           field: 'BarCode',      numberField: 'BarCode',        icon: 'qr_code',       display: ['Description',  'BarCode'       ] },
-    { name: 'PurchaseOrder',   field: 'Description',  numberField: 'PurchaseOrderNumber', icon: 'shopping_cart', display: ['Description',  'Vendor'], extraField: 'Vendor' },
+    // PO results show the number (copyable, like every other module) with the
+    // vendor beside it; before, only description and vendor showed, so similar
+    // POs were indistinguishable.
+    { name: 'PurchaseOrder',   field: 'Description',  numberField: 'PurchaseOrderNumber', icon: 'shopping_cart', display: ['Description', 'PurchaseOrderNumber'], extraField: 'Vendor' },
   ];
 
+  // Text value of an API field. Some codes come back as numbers, and calling
+  // string methods on those threw mid-render, leaving "Searching..." forever.
+  const searchText = (v) => (v === null || v === undefined) ? '' : String(v);
+
+  // A search request URL. The filter is built as JSON and fully encoded, so the
+  // query can contain " (12" MONITOR), & (D&E), # or + - previously spliced in
+  // raw, each of which corrupted the request and silently returned nothing.
+  function searchUrl(apiurl, filter, pagesize) {
+    return RW_URL + apiurl + '?filter=' + encodeURIComponent(JSON.stringify(filter)) + '&pagesize=' + pagesize;
+  }
+
+  // Each search supersedes the last: its requests are aborted and, should any
+  // still land, their results are ignored. Without this a slow earlier query
+  // ("LA5") could finish after a later one ("LA52953") and overwrite it.
+  let searchGeneration = 0;
+  let searchAbort = null;
+
   function appendRecordResults(query, resultsEl) {
+    const gen = ++searchGeneration;
+    searchAbort?.abort();
+    searchAbort = (typeof AbortController === 'function') ? new AbortController() : null;
     resultsEl.style.display = 'block';
     resultsEl.innerHTML = '<div style="padding: 6px 8px; color: #555; font-style: italic; font-size: 12px;">Searching...</div>';
 
@@ -6432,7 +6506,8 @@
         'content-type': 'application/json',
         'x-requested-with': 'XMLHttpRequest'
       },
-      credentials: 'include'
+      credentials: 'include',
+      signal: searchAbort?.signal,
     };
 
     Promise.all(SEARCH_MODULES.map(mod => {
@@ -6448,7 +6523,7 @@
       if (isInventorySearch) {
         if (mod.name !== 'RentalInventory') return Promise.resolve({ mod, items: [] });
         return Promise.all(terms.map(term =>
-          fetch(RW_URL + controller.apiurl + '?' + encodeURI(`filter={"Field":"${mod.field}","Op":"contains","Value":"${term}"}&pagesize=500`), fetchOpts)
+          fetch(searchUrl(controller.apiurl, { Field: mod.field, Op: 'contains', Value: term }, 500), fetchOpts)
             .then(r => r.json())
             .then(r => ({ term, items: r?.Items ?? [], total: r?.TotalItems ?? 0 }))
             .catch(() => ({ term, items: [], total: 0 }))
@@ -6460,9 +6535,9 @@
           // Client-side filter: every term must appear in Description or ICode
           const filtered = base.filter(item =>
             terms.every(term =>
-              (item[mod.field] ?? '').includes(term) ||
-              (item[mod.numberField] ?? '').includes(term) ||
-              (item[mod.extraField] ?? '').includes(term)
+              searchText(item[mod.field]).toUpperCase().includes(term) ||
+              searchText(item[mod.numberField]).toUpperCase().includes(term) ||
+              searchText(item[mod.extraField]).toUpperCase().includes(term)
             )
           );
           return { mod, items: filtered.slice(0, 15) };
@@ -6472,7 +6547,7 @@
       const pagesize = mod.extraField ? 20 : 8;
       const queryUpper = query.toUpperCase();
       const fetchField = (field, op = 'contains', value = queryUpper) => fetch(
-        RW_URL + controller.apiurl + '?' + encodeURI(`filter={"Field":"${field}","Op":"${op}","Value":"${value}"}&pagesize=${pagesize}`),
+        searchUrl(controller.apiurl, { Field: field, Op: op, Value: value }, pagesize),
         fetchOpts
       ).then(r => r.json()).then(r => r?.Items ?? []).catch(() => []);
 
@@ -6507,6 +6582,7 @@
         return { mod, items };
       });
     })).then(results => {
+      if (gen !== searchGeneration) return; // a newer search has started
       resultsEl.innerHTML = '';
       let any = false;
 
@@ -6523,8 +6599,8 @@
         resultsEl.appendChild(label);
 
         items.forEach(item => {
-          const primary = item[mod.display[0]] ?? '';
-          const secondary = (item[mod.display[1]] ?? '').replace(/-+$/, '');
+          const primary = searchText(item[mod.display[0]]);
+          const secondary = searchText(item[mod.display[1]]).replace(/-+$/, '');
           const row = el('div', `
             display: flex; align-items: center; gap: 8px;
             padding: 6px 8px; cursor: pointer; border-radius: 4px;
@@ -6535,7 +6611,7 @@
           icon.className = 'material-icons';
           icon.textContent = mod.icon;
 
-          const recordNumber = (item[mod.numberField] ?? '').replace(/-+$/, '');
+          const recordNumber = searchText(item[mod.numberField]).replace(/-+$/, '');
           const idField = RQ.api.module_identifier_names(mod.name)?.id;
           const openRecord = () => {
             const sq = document.getElementById('rq-dashboard-search');
@@ -6573,6 +6649,10 @@
               });
             });
             sWrap.appendChild(s);
+            const extra = mod.extraField ? searchText(item[mod.extraField]) : '';
+            if (extra && extra !== secondary && extra !== primary) {
+              sWrap.appendChild(el('span', 'font-size: 11px; color: #5a6a7a; margin-left: 6px;', extra));
+            }
             text.appendChild(sWrap);
           }
 
@@ -6587,6 +6667,8 @@
           row.addEventListener('mouseleave', () => { row.style.background = ''; gripIcon.style.opacity = '0'; });
 
           row.append(gripIcon, icon, text);
+          row.classList.add('rq-search-row');
+          row._open = openRecord; // for Enter from the search box
           attachExpandButton(row, mod.name, recordNumber, p, null, idField && item[idField] ? item[idField] : null);
           row.addEventListener('click', (e) => {
             if (p.contains(e.target) || gripIcon.contains(e.target)) return;
@@ -6655,6 +6737,10 @@
       if (!any) {
         resultsEl.innerHTML = '<div style="padding: 6px 8px; color: #555; font-style: italic; font-size: 12px;">No results</div>';
       }
+    }).catch(() => {
+      // Any unexpected failure must end the "Searching..." state, not leave it.
+      if (gen !== searchGeneration) return;
+      resultsEl.innerHTML = '<div style="padding: 6px 8px; color: #a05555; font-style: italic; font-size: 12px;">Search failed - try again</div>';
     });
   }
 

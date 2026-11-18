@@ -1152,6 +1152,91 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
         /'\.rq-date-today \{ box-shadow: inset/.test(dashSrc14) && !/remove\('rq-date-today'\)/.test(dashSrc14), true);
 
 
+  // -- Search ------------------------------------------------------------------
+  // The real appendRecordResults, run against a fake RentalWorks whose response
+  // times are controlled, so the ordering bug can actually be reproduced.
+  console.log('search:');
+  const SU = new Function('RW_URL',
+    extractFn('js/rq_dashboard.js', 'searchUrl') + '; return searchUrl;')('https://rw/');
+  const filterOf = (url) => JSON.parse(decodeURIComponent(url.split('filter=')[1].split('&pagesize=')[0]));
+  for (const q of ['12" MONITOR', 'D&E', '#2 KIT', '1/4-20 + SCREW', 'A,B']) {
+    check(`a query with ${JSON.stringify(q)} reaches the API intact`, filterOf(SU('api/v1/x', { Field: 'D', Op: 'contains', Value: q }, 8)).Value, q);
+  }
+  check('the page size survives', SU('api/v1/x', { Field: 'D', Op: '=', Value: 'A&pagesize=999' }, 8).endsWith('&pagesize=8'), true);
+
+  const fakeNode = (tag, css, html) => {
+    const n = { tag, html: html ?? '', kids: [], style: {}, classes: new Set(), handlers: {},
+      classList: { add: (c) => n.classes.add(c), remove: (c) => n.classes.delete(c), contains: (c) => n.classes.has(c) },
+      appendChild(c) { n.kids.push(c); return c; }, append(...c) { n.kids.push(...c); },
+      addEventListener(t, f) { (n.handlers[t] ||= []).push(f); }, contains: () => false,
+      set innerHTML(v) { n.kids = []; n.html = v; }, get innerHTML() { return n.html; } };
+    return n;
+  };
+  const delays = { SLOW: 40, FAST: 2 };
+  const fakeFetch = (url, opts) => new Promise((resolve, reject) => {
+    const value = filterOf(url).Value;
+    const t = setTimeout(() => resolve({ json: () => Promise.resolve({ Items: [
+      { OrderId: value + '-id', OrderNumber: value === 'NUM' ? 52953 : value, Description: value }] }) }),
+      delays[value] ?? 1);
+    opts?.signal?.addEventListener?.('abort', () => { clearTimeout(t); reject(new Error('aborted')); });
+  });
+  const SEARCH = new Function('fetch', 'el', 'window', 'RQ', 'attachExpandButton', 'document', 'AbortController', 'sessionStorage',
+    "const RW_URL = 'https://rw/';" +
+    "const SEARCH_MODULES = [{ name: 'Order', field: 'Description', numberField: 'OrderNumber', icon: 'x', display: ['Description', 'OrderNumber'] }];" +
+    "const searchText = (v) => (v === null || v === undefined) ? '' : String(v);" +
+    'let searchGeneration = 0; let searchAbort = null;' +
+    extractFn('js/rq_dashboard.js', 'searchUrl') +
+    extractFn('js/rq_dashboard.js', 'appendRecordResults') + '; return appendRecordResults;')(
+    fakeFetch, fakeNode, { OrderController: { apiurl: 'api/v1/order' } },
+    { api: { module_identifier_names: () => ({ id: 'OrderId' }) } }, () => {},
+    { getElementById: () => null }, AbortController, { apiToken: 'test' });
+  const shownPrimaries = (res) => res.kids.filter(k => k.classes?.has('rq-search-row'))
+    .map(r => r.kids[2].kids[0].kids[0].html);
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+  const res1 = fakeNode('div');
+  SEARCH('SLOW', res1);          // slow to answer
+  SEARCH('FAST', res1);          // typed after, answers first
+  await wait(80);
+  check('a slower earlier search cannot overwrite a newer one', [...new Set(shownPrimaries(res1))], ['FAST']);
+
+  // Two defences cover that race: aborting the old requests, and ignoring any
+  // results that still land. Cancelling alone passes the test above, so run it
+  // again with AbortController unavailable to prove the second defence holds.
+  const SEARCH_NOABORT = new Function('fetch', 'el', 'window', 'RQ', 'attachExpandButton', 'document', 'AbortController', 'sessionStorage',
+    "const RW_URL = 'https://rw/';" +
+    "const SEARCH_MODULES = [{ name: 'Order', field: 'Description', numberField: 'OrderNumber', icon: 'x', display: ['Description', 'OrderNumber'] }];" +
+    "const searchText = (v) => (v === null || v === undefined) ? '' : String(v);" +
+    'let searchGeneration = 0; let searchAbort = null;' +
+    extractFn('js/rq_dashboard.js', 'searchUrl') +
+    extractFn('js/rq_dashboard.js', 'appendRecordResults') + '; return appendRecordResults;')(
+    fakeFetch, fakeNode, { OrderController: { apiurl: 'api/v1/order' } },
+    { api: { module_identifier_names: () => ({ id: 'OrderId' }) } }, () => {},
+    { getElementById: () => null }, undefined, { apiToken: 'test' });
+  const res1b = fakeNode('div');
+  SEARCH_NOABORT('SLOW', res1b);
+  SEARCH_NOABORT('FAST', res1b);
+  await wait(80);
+  check('late results are ignored even when requests cannot be cancelled',
+        [...new Set(shownPrimaries(res1b))], ['FAST']);
+
+  const res2 = fakeNode('div');
+  SEARCH('NUM', res2);
+  await wait(20);
+  check('a numeric code renders instead of sticking on "Searching..."',
+        res2.kids.some(k => k.classes?.has('rq-search-row')), true);
+  check('result rows can be opened from the keyboard',
+        typeof res2.kids.find(k => k.classes?.has('rq-search-row'))?._open, 'function');
+
+  const dashSrc15 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('no request is built by splicing the query into text',
+        /encodeURI\(`filter=\{"Field"/.test(dashSrc15.slice(dashSrc15.indexOf('function appendRecordResults'))), false);
+  check('PO results show the PO number',
+        /name: 'PurchaseOrder',[^\n]*display: \['Description', 'PurchaseOrderNumber'\]/.test(dashSrc15), true);
+  check('Up/Down/Enter/Escape are handled in the search box',
+        ['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].every(k => dashSrc15.includes(`e.key === '${k}'`)), true);
+
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
 })();
