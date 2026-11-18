@@ -399,8 +399,10 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
 
   // Sub Rentals must go through the same expander rather than its own loop.
   const dashSrc2 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  // The order block takes its line builder as a parameter (Shortages passes its
+  // own); Sub Rentals relies on the default, so pin both halves.
   check('sub-rental blocks use the shared expander',
-        /buildSubRentalOrderBlock[\s\S]{0,2000}?renderRowItems\(holder, items, buildSubRentalItemLine\)/.test(dashSrc2), true);
+        /function buildSubRentalOrderBlock\(order, items, buildLine = buildSubRentalItemLine\)[\s\S]{0,2000}?renderRowItems\(holder, items, buildLine\)/.test(dashSrc2), true);
   check('sub-rental quantities survive the shared line builder',
         /ITEM_QTY_FIELDS\s*=\s*\[[^\]]*'SubQuantity'/.test(dashSrc2), true);
 
@@ -1041,6 +1043,45 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('Today is auto-refreshed', /today:\s+\(mode\) => loadToday\(mode\)/.test(dashSrc11), true);
   check('Sub Rentals now uses the shared pipeline',
         /groupSubRentalsByPickDate\(await fetchUnsourcedSubRentals\(from, to\)\)/.test(dashSrc11), true);
+
+
+  // -- Shortages ----------------------------------------------------------------
+  // Readings pinned to the real order these rules were derived from (LA52953):
+  // AvailableQuantity is what is left once the order is covered.
+  console.log('shortages:');
+  const SH = new Function(
+    extractFn('js/rq_dashboard.js', 'classifyAvailability') +
+    extractFn('js/rq_dashboard.js', 'shortageNote') +
+    '; return { classifyAvailability, shortageNote };')();
+  const line = (o) => ({ QuantityOrdered: 1, AvailableQuantity: 5, AvailabilityState: 'enough', ConflictDate: '', ...o });
+
+  check('spare left over is fine', SH.classifyAvailability(line({})), null);
+  check('covered with nothing spare is fully booked',
+        SH.classifyAvailability(line({ QuantityOrdered: 2, AvailableQuantity: 0, AvailabilityState: 'zero' })), 'tight');
+  check('the real "0 here, 2 elsewhere, enough" line is fully booked, not short',
+        SH.classifyAvailability(line({ QuantityOrdered: 3, AvailableQuantity: 0, AvailabilityState: 'zero',
+                                       AvailableQuantityAllWarehouses: 2 })), 'tight');
+  check('a negative remainder is short', SH.classifyAvailability(line({ AvailableQuantity: -2, AvailabilityState: 'zero' })), 'short');
+  check('a conflict date is short', SH.classifyAvailability(line({ ConflictDate: '2026-11-20' })), 'short');
+  check('a state that says negative is short', SH.classifyAvailability(line({ AvailabilityState: 'Negative' })), 'short');
+  check('a line ordering nothing is ignored', SH.classifyAvailability(line({ QuantityOrdered: 0, AvailableQuantity: -3 })), null);
+
+  check('a short line says by how much',
+        SH.shortageNote({ kind: 'short', AvailableQuantity: -2, AvailableQuantityAllWarehouses: -2 }), '2 short');
+  check('and where spares are, if anywhere',
+        SH.shortageNote({ kind: 'short', AvailableQuantity: -2, AvailableQuantityAllWarehouses: 1 }),
+        '2 short · 3 at other warehouses');
+  check('and what is already subbed',
+        SH.shortageNote({ kind: 'short', AvailableQuantity: -1, AvailableQuantityAllWarehouses: -1, SubQuantity: 1 }),
+        '1 short · 1 subbed');
+  check('a fully booked line says so', SH.shortageNote({ kind: 'tight', AvailableQuantity: 0 }), 'fully booked');
+
+  const dashSrc12 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('background refreshes wait out the Shortages TTL',
+        /if \(forceRefresh !== true && fresh\) return;/.test(dashSrc12), true);
+  check('fully booked lines are filtered at render, so the toggle needs no refetch',
+        /e\.items\.filter\(i => i\.kind === 'short' \|\| tight\)/.test(dashSrc12), true);
+  check('Shortages is auto-refreshed', /shortages:\s+\(mode\) => loadShortages\(mode\)/.test(dashSrc12), true);
 
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');

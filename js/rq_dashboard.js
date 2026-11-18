@@ -10,7 +10,7 @@
   const ARCHIVE_KEY         = 'rq-dashboard-archive';
   const TABS_KEY            = 'rq-dashboard-tabs';
   const ACTIVE_TAB_KEY      = 'rq-dashboard-active-tab';
-  const BUILTIN_IDS         = ['today', 'quicklinks', 'bookmarks', 'recents', 'archive', 'myorders', 'myquotes', 'mypos', 'subrentals', 'preps'];
+  const BUILTIN_IDS         = ['today', 'quicklinks', 'bookmarks', 'recents', 'archive', 'myorders', 'myquotes', 'mypos', 'subrentals', 'shortages', 'preps'];
   const MY_ORDERS_AGENT_KEY = 'rq-dashboard-my-orders-agent';
   const MY_QUOTES_AGENT_KEY   = 'rq-dashboard-my-quotes-agent';
   const MY_QUOTES_DUE_KEY     = 'rq-dashboard-my-quotes-due-field'; // 'start' | 'stop'
@@ -3761,6 +3761,7 @@
     mypos:      () => buildAgentCard('mypos'),
     today:      () => buildTodayCard(),
     subrentals: () => buildSubRentalsCard(),
+    shortages:  () => buildShortagesCard(),
     preps:      () => buildPrepsCard(),
   };
 
@@ -3837,6 +3838,7 @@
     { id: 'mypos',      label: 'My POs',         icon: 'shopping_cart' },
     { id: 'today',      label: 'Today',          icon: 'today'         },
     { id: 'subrentals', label: 'Sub Rentals',    icon: 'inventory_2'   },
+    { id: 'shortages',  label: 'Shortages',      icon: 'warning'       },
     { id: 'preps',      label: 'Preps',          icon: 'event_note'    },
   ];
 
@@ -3962,6 +3964,7 @@
     mypos:      (mode) => loadMyPOs(mode),
     subrentals: (mode) => loadSubRentals(mode),
     today:      (mode) => loadToday(mode),
+    shortages:  (mode) => loadShortages(mode),
     preps:      (mode) => loadPreps(mode),
   };
 
@@ -4046,13 +4049,14 @@
     if (AGENT_SECTIONS[id]) return AGENT_CACHE_TTL;
     if (id === 'subrentals') return SUBRENTAL_TTL;
     if (id === 'today')      return TODAY_TTL;
+    if (id === 'shortages')  return SHORTAGE_TTL;
     if (id === 'preps')      return PREPS_CACHE_TTL;
     return null;
   }
 
   // When a card's data was last fetched, or null for cards built locally.
   function cardFetchedAt(id) {
-    if (AGENT_SECTIONS[id] || id === 'subrentals' || id === 'today') return getCachedSection(id)?.fetchedAt ?? null;
+    if (AGENT_SECTIONS[id] || ['subrentals', 'today', 'shortages'].includes(id)) return getCachedSection(id)?.fetchedAt ?? null;
     if (id === 'preps') return getCachedPreps()?.fetchedAt ?? null;
     return null;
   }
@@ -4902,7 +4906,7 @@
     });
   }
 
-  function buildSubRentalOrderBlock(order, items) {
+  function buildSubRentalOrderBlock(order, items, buildLine = buildSubRentalItemLine) {
     const wrap = el('div', 'padding: 3px 14px 7px;');
     wrap.className = 'rq-subrental-order';
 
@@ -4924,7 +4928,7 @@
     wrap.appendChild(head);
 
     const holder = el('div', 'padding-left: 12px;');
-    renderRowItems(holder, items, buildSubRentalItemLine);
+    renderRowItems(holder, items, buildLine);
     wrap.appendChild(holder);
 
     return wrap;
@@ -4981,6 +4985,235 @@
     frag.append(inputWrap, applyBtn);
     card._cfgBar.insertBefore(frag, card._cfgBar.firstChild);
 
+    card._collapseBtn.insertAdjacentElement('beforebegin', refreshBtn);
+    return card;
+  }
+
+  // ── Shortages card ─────────────────────────────────────────────────
+  // Lines on orders picking soon where we are booked beyond what we own on
+  // those dates - the shortages nobody has marked as a sub-rental yet.
+  //
+  // RentalWorks already computes availability per order line, so this reads it
+  // rather than querying availability item by item. Reading the fields (from a
+  // real order, Nov 2026): AvailableQuantity is what is LEFT once this order is
+  // covered. A line needing 3 showed 0 here and 2 across all warehouses, yet
+  // all-warehouses still read "enough" - only consistent if the figure is the
+  // remainder. So:
+  //   AvailabilityState "enough"  spare remaining          -> fine
+  //   AvailabilityState "zero"    covered, nothing spare   -> fully booked
+  //   AvailableQuantity < 0       genuinely short by that many
+  // No short line has been observed yet, so the short test is deliberately
+  // broad (negative quantity, a conflict date, or a state that says so), and the
+  // states actually seen are logged once per session to confirm the reading.
+  const SHORTAGE_DAYS_KEY  = 'rq-dashboard-shortage-days';
+  const SHORTAGE_TIGHT_KEY = 'rq-dashboard-shortage-show-tight';
+  // Each order's full line list is large (~170 rows x 265 columns on a typical
+  // camera order), so this card refreshes far less often than the others - its
+  // TTL also gates background refreshes.
+  const SHORTAGE_TTL = 10 * 60 * 1000;
+
+  function shortageDays() {
+    const n = parseInt(localStorage.getItem(SHORTAGE_DAYS_KEY), 10);
+    return Number.isFinite(n) && n > 0 ? n : 7;
+  }
+  const showTightShortages = () => localStorage.getItem(SHORTAGE_TIGHT_KEY) === '1';
+
+  function fetchOrderItemsAvailability(orderId) {
+    return postGridBrowse('api/v1/orderitem/browse', buildGridBrowsePayload({
+      module: 'OrderItemGrid',
+      miscfields: { OrderId: { datafield: 'OrderId', value: orderId } },
+      uniqueids: { OrderId: orderId, RecType: 'R' },
+      orderby: 'ItemOrder asc',
+    }));
+  }
+
+  // 'short', 'tight' (fully booked, nothing spare) or null (fine / not stock).
+  function classifyAvailability(line) {
+    if (!(Number(line.QuantityOrdered) > 0)) return null;
+    const avail = Number(line.AvailableQuantity);
+    const state = String(line.AvailabilityState || '').toLowerCase();
+    if ((Number.isFinite(avail) && avail < 0) || /neg|short|conflict|over/.test(state) ||
+        String(line.ConflictDate || '').trim()) return 'short';
+    if (state === 'zero') return 'tight';
+    return null;
+  }
+
+  // Only what the card shows, so the session cache stays small.
+  function slimAvailabilityLine(l, kind) {
+    return {
+      kind, ICode: l.ICode, Description: l.Description,
+      QuantityOrdered: l.QuantityOrdered, SubQuantity: l.SubQuantity,
+      AvailableQuantity: l.AvailableQuantity, AvailabilityState: l.AvailabilityState,
+      AvailableQuantityAllWarehouses: l.AvailableQuantityAllWarehouses,
+      ConflictDate: l.ConflictDate,
+    };
+  }
+
+  // What to say after the item: "2 short · 3 at other warehouses · 1 subbed".
+  function shortageNote(it) {
+    const parts = [];
+    const avail = Number(it.AvailableQuantity);
+    if (it.kind === 'short') {
+      parts.push(Number.isFinite(avail) && avail < 0 ? `${-avail} short` : 'short');
+      const elsewhere = Number(it.AvailableQuantityAllWarehouses) - (Number.isFinite(avail) ? avail : 0);
+      if (Number.isFinite(elsewhere) && elsewhere > 0) parts.push(`${elsewhere} at other warehouses`);
+      if (String(it.ConflictDate || '').trim()) parts.push('from ' + String(it.ConflictDate).slice(0, 10));
+    } else if (it.kind === 'tight') {
+      parts.push('fully booked');
+    }
+    if (Number(it.SubQuantity) > 0) parts.push(`${Number(it.SubQuantity)} subbed`);
+    return parts.join(' · ');
+  }
+
+  function buildShortageLine(it) {
+    const line = buildRowItemLine(it);
+    line.appendChild(el('span', `flex-shrink: 0; color: ${it.kind === 'short' ? '#e05555' : '#a0782a'};`,
+                        shortageNote(it)));
+    return line;
+  }
+
+  let loggedAvailabilityStates = false;
+
+  async function loadShortages(forceRefresh = false) {
+    const body = document.getElementById('rq-card-body-shortages');
+    if (!body) return;
+
+    const cached = getCachedSection('shortages');
+    const fresh  = cached && (Date.now() - cached.fetchedAt) < SHORTAGE_TTL;
+    if (cached && body.dataset.rqRendered !== '1') renderShortages(cached.groups);
+    // Unlike the light cards, a background refresh still waits out the TTL here.
+    if (forceRefresh !== true && fresh) return;
+    if (!cached) body.innerHTML = placeholderHTML('Checking availability…');
+
+    const from = new Date(); from.setHours(0, 0, 0, 0);
+    const to = new Date(from); to.setDate(to.getDate() + shortageDays());
+
+    try {
+      const orders = await fetchOrdersWhere([
+        { Field: 'PickDate', Op: '>=', Value: ymdLocal(from) },
+        { Field: 'PickDate', Op: '<=', Value: ymdLocal(to)   },
+      ]);
+      const states = new Set();
+      const perOrder = await mapWithLimit(orders, SUBRENTAL_CONCURRENCY, async (o) => {
+        const lines = await fetchOrderItemsAvailability(o.OrderId);
+        lines.forEach(l => states.add(String(l.AvailabilityState)));
+        const items = [];
+        for (const l of lines) {
+          const kind = classifyAvailability(l);
+          if (kind) items.push(slimAvailabilityLine(l, kind));
+        }
+        // Shorts first: they are the ones that need action.
+        items.sort((a, b) => (a.kind === 'short' ? 0 : 1) - (b.kind === 'short' ? 0 : 1));
+        return { order: slimOrder(o), items };
+      });
+      if (!loggedAvailabilityStates) {
+        loggedAvailabilityStates = true;
+        console.info('[RQ] Shortages: availability states seen:', [...states].sort().join(', '));
+      }
+
+      const groups = groupSubRentalsByPickDate(perOrder.filter(g => g.items.length));
+      const unchanged = forceRefresh !== true && cached && sameData(groups, cached.groups);
+      setCachedSection('shortages', { groups, fetchedAt: Date.now() });
+      if (!unchanged) renderShortages(groups);
+      updateCardAges();
+    } catch {
+      if (!cached) body.innerHTML = placeholderHTML('Failed to check availability');
+    }
+  }
+
+  function renderShortages(groups) {
+    const body = document.getElementById('rq-card-body-shortages');
+    if (!body) return;
+    body.dataset.rqRendered = '1';
+    body.innerHTML = '';
+
+    // Fully booked lines are kept in the cache and only filtered here, so the
+    // toggle redraws without refetching.
+    const tight = showTightShortages();
+    const visible = (groups || [])
+      .map(g => ({ ...g, entries: g.entries
+        .map(e => ({ ...e, items: e.items.filter(i => i.kind === 'short' || tight) }))
+        .filter(e => e.items.length) }))
+      .filter(g => g.entries.length);
+
+    if (!visible.length) {
+      body.innerHTML = placeholderHTML(tight ? 'Nothing short or fully booked'
+                                            : `Nothing short in the next ${shortageDays()} days`);
+      return;
+    }
+
+    const todayStr = ymdLocal(new Date());
+    visible.forEach((g, gi) => {
+      const isToday = g.dateStr === todayStr;
+      const label = g.dateStr === 'nodate' ? 'No pick date'
+        : isToday ? 'Picks today'
+        : 'Picks ' + new Date(g.dateStr + 'T00:00:00').toLocaleDateString('en-US',
+            { weekday: 'long', month: 'long', day: 'numeric' });
+      body.appendChild(el('div', `
+        padding: 5px 14px 3px;
+        font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+        color: ${isToday ? '#e05555' : '#666'};
+        ${gi > 0 ? 'border-top: 1px solid #222;' : ''}
+      `, label));
+      g.entries.forEach(({ order, items }) =>
+        body.appendChild(buildSubRentalOrderBlock(order, items, buildShortageLine)));
+    });
+  }
+
+  function buildShortagesCard() {
+    const card = buildCard('Shortages', 'warning', 'shortages');
+
+    const daysInput = document.createElement('input');
+    daysInput.type = 'text';
+    daysInput.placeholder = 'Days ahead…';
+    daysInput.value = String(shortageDays());
+    daysInput.style.cssText = CFG_INPUT_CSS;
+    daysInput.addEventListener('click', e => e.stopPropagation());
+    daysInput.addEventListener('dragstart', e => e.stopPropagation());
+
+    const applyBtn = el('button', CFG_APPLY_BTN_CSS, 'Apply');
+    applyBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const n = parseInt(daysInput.value.trim(), 10);
+      if (Number.isFinite(n) && n > 0) localStorage.setItem(SHORTAGE_DAYS_KEY, String(n));
+      else localStorage.removeItem(SHORTAGE_DAYS_KEY);
+      daysInput.value = String(shortageDays());
+      clearCachedSection('shortages');
+      loadShortages(true);
+    });
+    daysInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') applyBtn.click();
+      e.stopPropagation();
+    });
+
+    const tightBtn = el('button', `
+      background: #1a1a2a; border: 1px solid #2a2a4a; color: #8ab; border-radius: 3px;
+      padding: 5px 8px; font-size: 11px; cursor: pointer; flex-shrink: 0; white-space: nowrap;`);
+    const paintTight = () => {
+      const on = showTightShortages();
+      tightBtn.textContent = on ? 'fully booked: shown' : 'fully booked: hidden';
+      tightBtn.style.borderColor = on ? '#4a6a8a' : '#2a2a4a';
+    };
+    paintTight();
+    tightBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      localStorage.setItem(SHORTAGE_TIGHT_KEY, showTightShortages() ? '0' : '1');
+      paintTight();
+      renderShortages(getCachedSection('shortages')?.groups || []);
+    });
+
+    const refreshBtn = makeIconButton('refresh', {
+      title: 'Refresh',
+      onClick: () => { clearCachedSection('shortages'); loadShortages(true); },
+    });
+
+    card._badgeToggleBtn?.remove();
+    const inputWrap = el('div', '');
+    inputWrap.className = 'rq-cfg-input-wrap';
+    inputWrap.appendChild(daysInput);
+    const frag = document.createDocumentFragment();
+    frag.append(inputWrap, applyBtn, tightBtn);
+    card._cfgBar.insertBefore(frag, card._cfgBar.firstChild);
     card._collapseBtn.insertAdjacentElement('beforebegin', refreshBtn);
     return card;
   }
