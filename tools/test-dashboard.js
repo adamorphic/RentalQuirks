@@ -1117,6 +1117,41 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('Shortages filters when drawing', /\(i\.kind === 'short' \|\| tight\) && !isPersonalGear\(i\)/.test(dashSrc13), true);
 
 
+  // -- My POs: start or stop today --------------------------------------------
+  console.log('po today highlight:');
+  const ymdToday = new Date().toLocaleDateString('en-CA');
+  const [ty, tm, td] = ymdToday.split('-');
+  const usToday = `${Number(tm)}/${Number(td)}/${ty}`;
+  const yesterday = new Date(Date.now() - 864e5).toLocaleDateString('en-CA');
+  const PT = new Function('detailCache', 'fetchRecordDetail',
+    extractFn('js/rq_dashboard.js', 'isTodayDate') +
+    extractFn('js/rq_dashboard.js', 'attachTodayHighlight') +
+    '; return { isTodayDate, attachTodayHighlight };');
+  const PTpure = PT(new Map(), () => new Promise(() => {}));
+  check('an ISO date today matches', PTpure.isTodayDate(ymdToday), true);
+  check('an ISO datetime today matches', PTpure.isTodayDate(ymdToday + 'T00:00:00'), true);
+  check('a US-format date today matches', PTpure.isTodayDate(usToday), true);
+  check('yesterday does not', PTpure.isTodayDate(yesterday), false);
+  check('blank does not', PTpure.isTodayDate(''), false);
+
+  const mkClassRow = () => { const c = new Set();
+    return { has: (x) => c.has(x), classList: { toggle: (x, on) => on ? c.add(x) : c.delete(x) } }; };
+  const runHL = async (rec) => {
+    const row = mkClassRow();
+    PT(new Map(), () => Promise.resolve({ record: rec })).attachTodayHighlight(row, 'PurchaseOrder', 'LA1');
+    await Promise.resolve(); await Promise.resolve();
+    return row.has('rq-date-today');
+  };
+  check('a PO starting today is highlighted', await runHL({ EstimatedStartDate: ymdToday, EstimatedStopDate: '2099-01-01' }), true);
+  check('a PO stopping today is highlighted', await runHL({ EstimatedStartDate: '2000-01-01', EstimatedStopDate: ymdToday }), true);
+  check('a PO with neither today is not', await runHL({ EstimatedStartDate: yesterday, EstimatedStopDate: '2099-01-01' }), false);
+
+  const dashSrc14 = fs.readFileSync('js/rq_dashboard.js', 'utf8');
+  check('My POs opts in', /mypos:[\s\S]{0,900}?highlightToday: true/.test(dashSrc14), true);
+  check('it has its own class, so the due badge cannot clear it',
+        /'\.rq-date-today \{ box-shadow: inset/.test(dashSrc14) && !/remove\('rq-date-today'\)/.test(dashSrc14), true);
+
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
 })();

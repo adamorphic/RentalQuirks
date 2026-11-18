@@ -1372,6 +1372,9 @@
         // Rows assign style.background inline on hover, which would paint over a
         // tint, so the due-today marker is an inset shadow on the leading edge.
         '.rq-due-today { box-shadow: inset 3px 0 0 #e09820; }',
+        // Same look, separate class: applyBadge clears .rq-due-today on every pass,
+        // so a second rule sharing it would be wiped whenever a badge recomputes.
+        '.rq-date-today { box-shadow: inset 3px 0 0 #e09820; }',
         '@keyframes rq-spin-kf { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }',
         '.rq-spin { animation: rq-spin-kf 0.6s ease-out 1; }',
       ].join('\n');
@@ -4234,6 +4237,7 @@
                 module: 'PurchaseOrder', icon: 'shopping_cart', numberField: 'PurchaseOrderNumber',
                 listItems: fetchPurchaseOrderItems, rowFilter: keepPurchaseOrderRow,
                 rowLabels: purchaseOrderRowLabels,
+                highlightToday: true, // either date today, not only the stop date
                 hidden: ['CLOSED', 'VOID'],                 unavailable: 'Purchase Order module not available', failed: 'Failed to load POs' },
     myquotes: { title: 'My Quotes', agentKey: MY_QUOTES_AGENT_KEY, controller: 'QuoteController',
                 module: 'Quote',         icon: 'request_quote', numberField: 'QuoteNumber',
@@ -4542,6 +4546,28 @@
     }, true);
   }
 
+  // True when a date value (ISO "2026-11-18..." or US "11/18/2026") is today, local time.
+  function isTodayDate(v) {
+    const str = String(v || '').trim();
+    if (!str) return false;
+    let ymd = str.slice(0, 10);
+    const us = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (us) ymd = `${us[3]}-${us[1].padStart(2, '0')}-${us[2].padStart(2, '0')}`;
+    return ymd === new Date().toLocaleDateString('en-CA');
+  }
+
+  // Marks a row whose record starts or stops today. The dates usually come from
+  // the detail fetch the due badge already makes, so this costs no extra request.
+  function attachTodayHighlight(row, module, recordNumber) {
+    const apply = (rec) => {
+      if (!rec) return;
+      row.classList.toggle('rq-date-today',
+        isTodayDate(rec.EstimatedStartDate) || isTodayDate(rec.EstimatedStopDate));
+    };
+    apply(detailCache.get(module + ':' + recordNumber)?.data?.record);
+    fetchRecordDetail(module, recordNumber).then(d => apply(d?.record)).catch(() => {});
+  }
+
   function renderBuiltinRows(cardId, apiItems, module, icon) {
     const body = document.getElementById('rq-card-body-' + cardId);
     if (!body) return;
@@ -4593,6 +4619,7 @@
       row.dataset.rowIndex = idx;
       body.appendChild(row);
       attachChangeMarker(row, module, recordNumber, _raw);
+      if (AGENT_SECTIONS[cardId]?.highlightToday) attachTodayHighlight(row, module, recordNumber);
 
       if (itemFetcher && idField && _raw[idField]) {
         // Sibling of the row, not a child: the row itself is a single flex line.
