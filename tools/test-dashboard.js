@@ -1321,7 +1321,7 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   await wait(40);
   check('after the delay the card appears', shown(), true);
   check('details are fetched once', fetches, 1);
-  check('it shows the full name and the details', cardText(), 'Burger King Shoot LA1 | DETAIL:ACME LA1');
+  check('it shows the full name, the number and the details', cardText(), 'Burger King Shoot LA1 | LA1 | DETAIL:ACME LA1');
   check('it sits just under the line', [HV.card().style.left, HV.card().style.top], ['100px', '202px']);
   h.line.fire('mouseleave');
   check('moving off the line hides it', shown(), false);
@@ -1369,6 +1369,11 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   h = mkHoverRow('LA9');
   h.line.fire('mouseenter'); await wait(45);
   check('the full note is included', cardText().endsWith('Call before delivery'), true);
+  HV.hideHoverCard();
+
+  h = mkHoverRow('ICODE-1---');
+  h.line.fire('mouseenter'); await wait(45);
+  check('trailing dashes are trimmed from the number', HV.card().kids[1].textContent, 'ICODE-1');
   HV.hideHoverCard();
 
   check('the card never takes the mouse', /pointer-events: none/.test(HV.card().css), true);

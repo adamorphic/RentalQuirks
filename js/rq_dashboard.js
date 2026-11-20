@@ -1375,9 +1375,17 @@
       if (token !== hoverToken || !anchor.isConnected) return;
       hoverCardEl.innerHTML = '';
       // The full name: the line itself is often cut off with an ellipsis.
-      hoverCardEl.appendChild(el('div', `
+      const head = hoverCardEl.appendChild(el('div', `
         padding: 8px 14px 6px; font-size: 12px; font-weight: 600; color: #f0f0f0;
         line-height: 1.35; overflow-wrap: anywhere;`, anchor.textContent.trim()));
+      // The record's number (order/quote/PO number, I-Code...), when it has one.
+      const number = String(recordNumber ?? '').replace(/-+$/, '').trim();
+      if (number) {
+        head.style.paddingBottom = '0';
+        hoverCardEl.appendChild(el('div', `
+          padding: 1px 14px 6px; font-size: 11px; color: #888;
+          font-variant-numeric: tabular-nums;`, number));
+      }
       const body = el('div', '');
       body.innerHTML = bodyHTML;
       hoverCardEl.appendChild(body);
