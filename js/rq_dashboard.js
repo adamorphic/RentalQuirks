@@ -3216,6 +3216,7 @@
     rowIcon.textContent = icon;
 
     const text = el('div', 'flex: 1; overflow: hidden; min-width: 0;');
+    text.className = 'rq-row-text';
     const pWrap = el('div', 'white-space: nowrap; overflow: hidden; text-overflow: ellipsis;');
     const p = el('span', 'color: #f0f0f0; cursor: pointer;', primary);
     p.addEventListener('mouseenter', () => p.style.textDecoration = 'underline');
@@ -3262,6 +3263,7 @@
     }
 
     const tagsEl = el('div', 'display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px;');
+    tagsEl.className = 'rq-row-tags';
     const renderTagChips = (currentTags) => {
       const defs = loadTagDefs();
       tagsEl.innerHTML = '';
@@ -4579,13 +4581,20 @@
       badge?.remove();
       badge = null;
       if (!changes.length) return;
-      badge = el('span', `
+      // Its own line inside the text column, under the number/customer line, so it
+      // never takes width from the name or number (as a sibling of the text
+      // column it squeezed both into ellipses). Long summaries ellipsize instead.
+      const textCol = row.querySelector?.('.rq-row-text');
+      badge = el(textCol ? 'div' : 'span', textCol ? `
+        font-size: 10px; font-weight: 600; color: #7ab8e8; margin-top: 2px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;` : `
         font-size: 10px; font-weight: 600; color: #7ab8e8; background: #182838;
         border: 1px solid #24405a; border-radius: 3px; padding: 0 5px; margin-top: 2px;
         flex-shrink: 0; white-space: nowrap; cursor: pointer;`, '● ' + summarizeChanges(changes));
       badge.className = 'rq-change-badge';
       badge.title = describeChanges(changes) + '\n\nOpen or expand the record to clear.';
-      row.insertBefore(badge, row.children[2] || null);
+      if (textCol) textCol.insertBefore(badge, textCol.querySelector('.rq-row-tags'));
+      else row.insertBefore(badge, row.children[2] || null);
     };
 
     paint();

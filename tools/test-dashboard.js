@@ -965,7 +965,7 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
       click() { r.captured.forEach(fn => fn()); } };
     return r;
   };
-  const fakeElSimple = (tag, css, text) => ({ tag, textContent: text ?? '', title: '', className: '' });
+  const fakeElSimple = (tag, css, text) => ({ tag, css, textContent: text ?? '', title: '', className: '' });
   const mkAttach = () => new Function('localStorage', 'el', 'detailCache', 'fetchRecordDetail',
     "const SEEN_KEY='rq-dashboard-seen-v1';const SEEN_PRUNE_MS=1e12;const SEEN_TOUCH_MS=864e5;" +
     constBlock + 'let seenCache = null;' +
@@ -997,6 +997,22 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   rowA = mkFakeRow();
   mkAttach()(rowA, 'Order', 'LA1', { Status: 'CONFIRMED', Description: 'JOB' });
   check('and a later change to it is flagged', badgeOf(rowA)?.textContent, '● dates moved');
+
+  // In a real card row the marker goes inside the text column, above the tags,
+  // never beside the column where it squeezed the name and number.
+  const tagsCol = { className: 'rq-row-tags' };
+  const textCol = { className: 'rq-row-text', children: [{}, {}, tagsCol],
+    querySelector: (s) => s === '.rq-row-tags' ? tagsCol : null,
+    insertBefore(n, ref) { textCol.children.splice(textCol.children.indexOf(ref), 0, n); } };
+  const rowB = mkFakeRow();
+  rowB.querySelector = (s) => s === '.rq-row-text' ? textCol : null;
+  mkAttach()(rowB, 'Order', 'LA2', { Status: 'QUOTE' });
+  mkAttach()(rowB, 'Order', 'LA2', { Status: 'CONFIRMED' });
+  check('the marker is not placed beside the text column', badgeOf(rowB), undefined);
+  check('it sits inside the text column, just above the tags',
+        textCol.children.map(c => c.className).slice(-2), ['rq-change-badge', 'rq-row-tags']);
+  check('long summaries ellipsize instead of widening the row',
+        /text-overflow: ellipsis/.test(textCol.children.find(c => c.className === 'rq-change-badge')?.css ?? ''), true);
 
   check('markers are attached to agent rows',
         /attachChangeMarker\(row, module, recordNumber, _raw\);/.test(dashSrc11), true);
