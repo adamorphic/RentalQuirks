@@ -1312,12 +1312,113 @@
     else row.appendChild(badge);
   }
 
+  // ── Hover cards ────────────────────────────────────────────────────
+  // Resting on a row's main line for a moment shows the details the row expands
+  // to, in a floating card; moving off the line hides it. The card ignores the
+  // mouse (pointer-events: none), so it never covers what you are aiming at and
+  // cannot hold itself open. Details are only fetched once the delay has passed,
+  // so sweeping the mouse across a list costs no requests.
+  const HOVER_DELAY_MS = 600;
+  let hoverCardEl = null;
+  let hoverTimer = null;
+  let hoverToken = 0;   // bumps on every show/hide; late fetches check it
+  let hoverAnchor = null;
+
+  // Catches every way the mouse can leave without a mouseleave on the line: the
+  // row being redrawn under the cursor, scrolling the list, the panel closing.
+  function hoverStrayCheck(e) {
+    if (!hoverAnchor || !hoverAnchor.isConnected || !hoverAnchor.contains(e.target)) hideHoverCard();
+  }
+
+  function hideHoverCard() {
+    clearTimeout(hoverTimer);
+    hoverTimer = null;
+    hoverToken++;
+    hoverAnchor = null;
+    if (hoverCardEl) hoverCardEl.style.display = 'none';
+    document.removeEventListener('mouseover', hoverStrayCheck, true);
+    document.removeEventListener('scroll', hideHoverCard, true);
+  }
+
+  // Below the line, or above it when there is no room; always inside the window.
+  function placeHoverCard(anchor) {
+    const card = hoverCardEl;
+    const a = anchor.getBoundingClientRect();
+    const margin = 8;
+    const left = Math.max(margin, Math.min(a.left, window.innerWidth - card.offsetWidth - margin));
+    let top = a.bottom + 4;
+    if (top + card.offsetHeight > window.innerHeight - margin) {
+      top = Math.max(margin, a.top - card.offsetHeight - 4);
+    }
+    card.style.left = left + 'px';
+    card.style.top = top + 'px';
+  }
+
+  function showHoverCard(anchor, module, recordNumber, knownId) {
+    if (!anchor.isConnected) return;
+    if (!hoverCardEl) {
+      hoverCardEl = el('div', `
+        position: fixed; z-index: 100001; width: 360px; max-height: 70vh; overflow: hidden;
+        background: #181818; border: 1px solid #3a3a3a; border-radius: 6px;
+        box-shadow: 0 8px 28px rgba(0,0,0,0.6); pointer-events: none; display: none;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-size: 13px; color: #e8e8e8;`);
+      hoverCardEl.id = 'rq-hover-card';
+      document.body.appendChild(hoverCardEl);
+    }
+    const token = ++hoverToken;
+    hoverAnchor = anchor;
+    document.addEventListener('mouseover', hoverStrayCheck, true);
+    document.addEventListener('scroll', hideHoverCard, true);
+
+    const render = (bodyHTML) => {
+      if (token !== hoverToken || !anchor.isConnected) return;
+      hoverCardEl.innerHTML = '';
+      // The full name: the line itself is often cut off with an ellipsis.
+      hoverCardEl.appendChild(el('div', `
+        padding: 8px 14px 6px; font-size: 12px; font-weight: 600; color: #f0f0f0;
+        line-height: 1.35; overflow-wrap: anywhere;`, anchor.textContent.trim()));
+      const body = el('div', '');
+      body.innerHTML = bodyHTML;
+      hoverCardEl.appendChild(body);
+      const note = (getItemMetaEntry(module, recordNumber).notes || '').trim();
+      if (note) {
+        hoverCardEl.appendChild(el('div', `
+          padding: 6px 14px 9px; border-top: 1px solid #2a2a2a; font-size: 11px; color: #aaa;
+          font-style: italic; white-space: pre-wrap; overflow-wrap: anywhere;`, note));
+      }
+      hoverCardEl.style.display = 'block';
+      placeHoverCard(anchor);
+    };
+
+    const cached = detailCache.get(module + ':' + recordNumber)?.data;
+    render(cached ? buildDetailHTML(cached)
+      : '<div style="padding:6px 14px 10px;color:#555;font-style:italic;font-size:11px;border-top:1px solid #2e2e2e;">Loading...</div>');
+    fetchRecordDetail(module, recordNumber, knownId)
+      .then(data => render(buildDetailHTML(data)))
+      .catch(() => render(buildDetailHTML(null)));
+  }
+
   function attachExpandButton(row, module, recordNumber, primaryEl, sectionId = null, knownId = null) {
     let expanded = false;
     let detailDiv = null;
 
+    // The row's main line (the primary text's line, not just the text itself).
+    const hoverLine = primaryEl?.parentElement || primaryEl;
+    if (hoverLine && module && recordNumber) {
+      hoverLine.addEventListener('mouseenter', () => {
+        if (expanded) return; // the same details are already showing inline
+        clearTimeout(hoverTimer);
+        hoverTimer = setTimeout(() => showHoverCard(hoverLine, module, recordNumber, knownId), HOVER_DELAY_MS);
+      });
+      hoverLine.addEventListener('mouseleave', hideHoverCard);
+      hoverLine.addEventListener('mousedown', hideHoverCard);
+      row.addEventListener('dragstart', hideHoverCard);
+    }
+
     const btn = { click: toggle };
     function toggle() {
+      hideHoverCard();
       expanded = !expanded;
 
       if (primaryEl) {
@@ -1919,6 +2020,7 @@
     const panel = document.getElementById('rq-dashboard');
     const overlay = document.getElementById('rq-dashboard-overlay');
     if (!panel) return;
+    hideHoverCard();
     overlay.style.opacity = '0';
     overlay.style.pointerEvents = 'none';
     panel.style.transform = 'translateX(100%)';

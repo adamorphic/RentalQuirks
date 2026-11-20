@@ -1269,6 +1269,112 @@ const NOW = new Date(2026, 2, 5, 13, 30).getTime(); // crosses a month boundary 
   check('Up/Down/Enter/Escape are handled in the search box',
         ['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].every(k => dashSrc15.includes(`e.key === '${k}'`)), true);
 
+  // -- Hover cards -------------------------------------------------------------
+  // The real hover code and attachExpandButton, against a fake DOM and a short delay.
+  console.log('hover cards:');
+  const hnode = (tag, css, text) => {
+    const n = { tag, css, textContent: text ?? '', style: {}, kids: [], handlers: {}, isConnected: true,
+      offsetWidth: 360, offsetHeight: 200, id: '',
+      appendChild(c) { n.kids.push(c); return c; }, after() {},
+      addEventListener(t, f) { (n.handlers[t] ||= []).push(f); },
+      fire(t, e = {}) { (n.handlers[t] || []).forEach(f => f(e)); },
+      contains(x) { return x === n || n.kids.includes(x); },
+      set innerHTML(v) { n.kids = []; n._html = v; }, get innerHTML() { return n._html ?? ''; } };
+    return n;
+  };
+  const docListeners = new Set();
+  const hdoc = { body: hnode('body'),
+    addEventListener: (t, f) => docListeners.add(t + ':' + f.name),
+    removeEventListener: (t, f) => docListeners.delete(t + ':' + f.name) };
+  let fetches = 0;
+  const hdetail = new Map();
+  const HV = new Function('el', 'document', 'window', 'detailCache', 'fetchRecordDetail', 'getItemMetaEntry',
+    'buildDetailHTML', 'DETAIL_TTL', 'attachDetailLinks', 'addBarcodeSection', 'addNotesSection',
+    'addEmailLinksSection', 'addAvailabilityCheck',
+    'const HOVER_DELAY_MS = 30; let hoverCardEl = null; let hoverTimer = null; let hoverToken = 0; let hoverAnchor = null;' +
+    ['hoverStrayCheck', 'hideHoverCard', 'placeHoverCard', 'showHoverCard', 'attachExpandButton']
+      .map(n => extractFn('js/rq_dashboard.js', n)).join('') +
+    '; return { attachExpandButton, hideHoverCard, card: () => hoverCardEl };')(
+    hnode, hdoc, { innerWidth: 1200, innerHeight: 800 }, hdetail,
+    (m, rn) => { fetches++; return new Promise(r => setTimeout(() => r({ record: { Customer: 'ACME ' + rn } }), 5)); },
+    (m, rn) => rn === 'LA9' ? { tags: [], notes: 'Call before delivery' } : { tags: [] },
+    (d) => d?.record ? 'DETAIL:' + d.record.Customer : 'NONE', 60000,
+    () => {}, () => {}, () => {}, () => {}, () => {});
+
+  const mkHoverRow = (rn, top = 180) => {
+    const row = hnode('div');
+    const line = hnode('div');
+    const p = hnode('span', '', 'Burger King Shoot ' + rn);
+    line.appendChild(p); p.parentElement = line; line.textContent = p.textContent;
+    line.getBoundingClientRect = () => ({ left: 100, top, bottom: top + 18 });
+    const btn = HV.attachExpandButton(row, 'Order', rn, p);
+    return { row, line, p, btn };
+  };
+  const shown = () => HV.card()?.style.display === 'block';
+  const cardText = () => HV.card().kids.map(k => k.textContent || k.innerHTML).join(' | ');
+
+  let h = mkHoverRow('LA1');
+  h.line.fire('mouseenter');
+  await wait(10);
+  check('nothing appears before the delay', shown(), false);
+  check('and nothing is fetched yet', fetches, 0);
+  await wait(40);
+  check('after the delay the card appears', shown(), true);
+  check('details are fetched once', fetches, 1);
+  check('it shows the full name and the details', cardText(), 'Burger King Shoot LA1 | DETAIL:ACME LA1');
+  check('it sits just under the line', [HV.card().style.left, HV.card().style.top], ['100px', '202px']);
+  h.line.fire('mouseleave');
+  check('moving off the line hides it', shown(), false);
+  check('and stops listening to the page', docListeners.size, 0);
+
+  fetches = 0;
+  h = mkHoverRow('LA2');
+  h.line.fire('mouseenter'); await wait(10); h.line.fire('mouseleave'); await wait(40);
+  check('a quick pass over a row shows nothing', shown(), false);
+  check('and costs no request', fetches, 0);
+
+  h = mkHoverRow('LA3');
+  h.line.fire('mouseenter'); await wait(32); h.line.fire('mouseleave'); await wait(10);
+  check('a fetch that lands after mouse-away does not reopen it', shown(), false);
+
+  h = mkHoverRow('LA4');
+  h.btn.click(); // expanded inline
+  h.line.fire('mouseenter'); await wait(45);
+  check('no card over a row that is already expanded', shown(), false);
+
+  h = mkHoverRow('LA5', 760);
+  h.line.fire('mouseenter'); await wait(45);
+  check('near the bottom it opens above the line instead', HV.card().style.top, (760 - 200 - 4) + 'px');
+  h.line.fire('mouseleave');
+
+  h = mkHoverRow('LA6');
+  h.line.fire('mouseenter'); await wait(45);
+  h.line.fire('mousedown');
+  check('clicking the line hides it', shown(), false);
+
+  h = mkHoverRow('LA7');
+  h.line.fire('mouseenter'); await wait(45);
+  // A redraw can replace the row under a still mouse; the next mouse movement
+  // anywhere (or a scroll) must then clear the card.
+  check('a stray-mouse check is registered while shown', docListeners.has('mouseover:hoverStrayCheck'), true);
+  check('and scrolling hides it', docListeners.has('scroll:hideHoverCard'), true);
+  HV.hideHoverCard();
+
+  hdetail.set('Order:LA8', { data: { record: { Customer: 'CACHED' } }, fetchedAt: Date.now() });
+  h = mkHoverRow('LA8');
+  h.line.fire('mouseenter'); await wait(31);
+  check('cached details show immediately, no "Loading..."', cardText().includes('DETAIL:CACHED'), true);
+  HV.hideHoverCard();
+
+  h = mkHoverRow('LA9');
+  h.line.fire('mouseenter'); await wait(45);
+  check('the full note is included', cardText().endsWith('Call before delivery'), true);
+  HV.hideHoverCard();
+
+  check('the card never takes the mouse', /pointer-events: none/.test(HV.card().css), true);
+  check('closing the panel hides it',
+        /function closePanel\(\) \{[^}]*hideHoverCard\(\);/.test(dashSrc15), true);
+
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll checks passed.');
   process.exit(failures ? 1 : 0);
